@@ -22,7 +22,7 @@ The current primary simulation surface is the conductance-based notebook with a 
 - `lif_inference/` — Packaged learned-LIF implementation modules.
 - `learned_lif_connectivity_modular.ipynb` — Recommended inference notebook. Imports `lif_inference/` directly.
 - `lif_inference/learned_lif_connectivity.py` — Packaged spike-only learned-LIF CLI module.
-- `lif_inference/voltage_augmented_learned_lif_connectivity.py` — Packaged voltage-augmented learned-LIF CLI module.
+- `lif_inference/voltage_augmented_learned_lif_connectivity.py` — Packaged voltage-augmented learned-LIF CLI module. In addition to the legacy event-window path, it now exposes opt-in per-neuron surrogate-FDR thresholding, reduced intrinsic slow states, and continuous-state chunk training.
 - `scripts/run_voltage_lambda_sweep.py` — Sweep helper for voltage-augmented learned-LIF runs.
 
 ### Documentation
@@ -116,6 +116,8 @@ Run the sag/rebound probe cell in the conductance notebook to compare the same n
 ### Fit Connectivity Models
 - Learned-LIF: `python -m lif_inference.learned_lif_connectivity`
 - Voltage-augmented learned-LIF: `python -m lif_inference.voltage_augmented_learned_lif_connectivity`
+- For real-data-style non-leaky thresholding in the voltage path, prefer `--connectivity-threshold-mode surrogate_fdr` or the row-calibrated `--connectivity-threshold-mode surrogate_fdr_per_neuron`; `oracle_f1` remains a retrospective simulated-data benchmark.
+- Use `--slow-state-mode adaptation_h` to add reduced adaptation and h-like intrinsic states to the inference LIF, and `--training-mode continuous_state` when you want those states carried across ordered recording chunks rather than reset for every event window.
 
 ### Archived Materials
 Out-of-scope GNN, baseline, presentation, scratch, and legacy notebook files have been removed from this cleaned repo snapshot.

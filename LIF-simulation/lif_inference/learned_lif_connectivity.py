@@ -1248,7 +1248,7 @@ def plot_recording_raster_with_exclusions(spike_times, cluster_assignments,
     return fig, ax
 
 
-def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
+def run_pipeline(session_dir, K=100, recording_idx=0, n_epochs=100, lr=1e-3,
                  batch_size=64, patience=20, val_fraction=0.2, dt=1.0,
                  max_delay=5, l1_lambda=0.01, pos_weight=5.0,
                  subsample_T=None, device=None, output_tag=None,
@@ -1266,7 +1266,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
                  surrogate_patience=1,
                  surrogate_min_shift_fraction=0.10,
                  surrogate_seed=1234,
-                 exclude_detected_bursts=False,
+                 exclude_detected_bursts=True,
                  burst_activity_bin_ms=100.0,
                  burst_smooth_bins=3,
                  burst_threshold_std=3.0,
@@ -1828,7 +1828,7 @@ def build_parser():
     parser.add_argument('--session', type=str, default=None)
     parser.add_argument('--output-tag', type=str, default=None,
                         help='Optional suffix for saved artifact names')
-    parser.add_argument('--k', type=int, default=50)
+    parser.add_argument('--k', type=int, default=100)
     parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--batch', type=int, default=128, help='Windows per batch')
@@ -1893,8 +1893,12 @@ def build_parser():
                         help='Optional cap on unique pre-centered trigger bins sampled per postsynaptic neuron')
     parser.add_argument('--val-fraction', type=float, default=0.2,
                         help='Validation fraction: held-out recordings when possible, otherwise held-out windows')
-    parser.add_argument('--exclude-detected-bursts', action='store_true',
-                        help='Detect network burst windows and exclude them from candidate scoring and event windows')
+    burst_group = parser.add_mutually_exclusive_group()
+    burst_group.add_argument('--exclude-detected-bursts', dest='exclude_detected_bursts', action='store_true',
+                             help='Detect network burst windows and exclude them from candidate scoring and event windows (default)')
+    burst_group.add_argument('--include-detected-bursts', dest='exclude_detected_bursts', action='store_false',
+                             help='Keep detected network burst windows in candidate scoring and event windows')
+    parser.set_defaults(exclude_detected_bursts=True)
     parser.add_argument('--burst-activity-bin-ms', type=float, default=100.0,
                         help='Burst detection activity bin width in ms')
     parser.add_argument('--burst-smooth-bins', type=int, default=3,

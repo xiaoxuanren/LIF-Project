@@ -15,6 +15,8 @@ scripts/run_h_current_sag_probe.py                                (Validation: s
 scripts/plot_saved_session.py                                     (Visualization: load saved sessions and generate shared plots)
 scripts/compare_h_current_ablation.py                             (Analysis: compare saved h-current on/off sessions and detect bursts)
 scripts/inspect_data.py                                           (Utility: inspect raw saved voltage traces)
+scripts/analyze_burst_voltage.py                                  (Analysis: burst-aligned raw and spike-masked voltage summaries)
+scripts/analyze_connected_pair_psp.py                             (Analysis: connected-pair PSP timing from raw voltage sidecars)
 
 learned_lif_connectivity_modular.ipynb                            (Step 2a: modular learned-LIF notebook over lif_inference/)
 lif_inference/learned_lif_connectivity.py                         (Step 2b: packaged spike-only learned-LIF CLI module)
@@ -85,6 +87,16 @@ lif_inference/                                                    (Shared learne
 **`scripts/inspect_data.py`**
 - Quick raw-voltage inspection helper for an individual recording file.
 - Useful when the full notebook or saved-session plotting path is more than you need.
+
+**`scripts/analyze_burst_voltage.py`**
+- Streams raw HDF5 voltage sidecars around saved stimulation onsets and detected network-burst windows without loading the full session voltage tensor.
+- Reports baseline/during/after voltage summaries for both raw traces and spike-masked subthreshold traces, plus burst-aligned population figures and example voltage traces.
+- Useful when checking whether burst periods are dominated by depolarization, reset/refractory effects, or post-burst hyperpolarization before changing inference exclusions.
+
+**`scripts/analyze_connected_pair_psp.py`**
+- Streams raw HDF5 voltage sidecars around presynaptic spikes for true structural connected pairs and matched unconnected controls.
+- Reports pair-level PSP peak/trough timing, amplitudes, population averages, example traces, and mean-pooling-vs-striding downsample diagnostics.
+- Useful for checking whether `--max-delay` and voltage downsampling choices cover the measured PSP support.
 
 ---
 
@@ -399,13 +411,13 @@ By default it trains on all recordings in a session concatenated along time, whi
 **Usage**
 
 ```text
-python -m lif_inference.learned_lif_connectivity --k 50 --epochs 40 --batch 128 --max-delay 8
+python -m lif_inference.learned_lif_connectivity --k 100 --epochs 40 --batch 128 --max-delay 8 --exclude-detected-bursts
 python -m lif_inference.learned_lif_connectivity --subsample 10000
 python -m lif_inference.learned_lif_connectivity --single-recording --recording 0 --k 30
 ```
 
 **Recommended working configuration after tuning**
-- `K=50`
+- `K=100`
 - `epochs=40`
 - `batch=128`
 - `max-delay=8`
@@ -413,6 +425,7 @@ python -m lif_inference.learned_lif_connectivity --single-recording --recording 
 - `val-fraction=0.2`
 - `candidate-mode=hybrid`
 - `candidate-spatial-frac=0.8`
+- detected-burst exclusion enabled by default
 
 **Outputs**
 - `learned_lif_outputs/learned_lif_<output_name>.png` — training curves, score distributions, PR curve, connectivity views, and learned membrane summaries
@@ -509,7 +522,7 @@ After each epoch, the pipeline measures held-out spike-prediction loss and then 
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--k` | 50 | Candidate presynaptic neurons per postsynaptic neuron |
+| `--k` | 100 | Candidate presynaptic neurons per postsynaptic neuron |
 | `--max-delay` | 8 | Number of discrete delay bins per candidate synapse |
 | `--epochs` | 40 | Maximum training epochs |
 | `--lr` | 0.001 | Adam learning rate |
@@ -537,7 +550,8 @@ After each epoch, the pipeline measures held-out spike-prediction loss and then 
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--exclude-detected-bursts` | off | Exclude detected network-burst windows from candidate scoring and event extraction |
+| `--exclude-detected-bursts` | on | Exclude detected network-burst windows from candidate scoring and event extraction |
+| `--include-detected-bursts` | off | Keep detected network-burst windows in candidate scoring and event extraction |
 | `--burst-activity-bin-ms` | 100.0 | Burst detection activity bin width |
 | `--burst-smooth-bins` | 3 | Burst detection smoothing width |
 | `--burst-threshold-std` | 3.0 | Threshold = mean + std factor * std |
@@ -562,7 +576,7 @@ python -m lif_inference.voltage_augmented_learned_lif_connectivity --single-reco
 
 **Outputs**
 - `voltage_augmented_learned_lif_outputs/voltage_augmented_learned_lif_<output_name>.png` — visualization summary
-- `voltage_augmented_learned_lif_outputs/voltage_augmented_learned_lif_<output_name>.pt` — checkpoint with model state, validation summary, candidate info, recording summaries, and voltage-cleaning settings
+- `voltage_augmented_learned_lif_outputs/voltage_augmented_learned_lif_<output_name>.pt` — checkpoint with model state, validation summary, candidate info, recording summaries, voltage-cleaning settings, and event-window reconstruction settings
 - `voltage_augmented_learned_lif_outputs/connectivity_<output_name>.npz` — compressed connectivity export
 
 ### What Changes Relative to the Spike-Only Path
@@ -581,7 +595,7 @@ python -m lif_inference.voltage_augmented_learned_lif_connectivity --single-reco
 	If an explicit `dt` is coarser than the saved voltage sample rate, it must be an integer multiple; the pipeline masks spike neighborhoods at native voltage resolution and then downsamples the cleaned voltage targets into the requested bins.
 5. Normalize each neuron's voltage trace after masking spike neighborhoods and any legacy high-voltage peaks.
 6. Concatenate all recordings across time while preserving recording boundaries for later train/validation splitting.
-7. Build candidate presynaptic sets, then create matched spike-and-voltage event windows for the same postsynaptic neurons.
+7. Build candidate presynaptic sets, then either create matched spike-and-voltage event windows or prepare ordered continuous chunks, depending on `--training-mode`.
 
 ### Voltage Preprocessing and Masking
 
@@ -589,7 +603,7 @@ The preprocessing stage is implemented by `preprocess_voltage_recording()` and i
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `mask_pre_ms` | 1.0 | Mask duration before each spike-aligned sample neighborhood |
+| `mask_pre_ms` | 0.0 | Mask duration before each spike-aligned sample neighborhood; the default preserves the pre-spike depolarization ramp |
 | `mask_post_ms` | 2.0 | Mask duration after each spike-aligned sample neighborhood |
 | `peak_threshold_mv` | 15.0 | Mask any legacy saved voltage samples above this threshold |
 
@@ -630,7 +644,7 @@ These are the internal dataset controls used by `build_train_val_voltage_dataset
 |-----------|---------|-------------|
 | `pre_context` | 50 | Causal presynaptic history before the event |
 | `post_context` | 10 | Bins after the event for spike and reset dynamics |
-| `warmup` | 30 | Warmup bins before the loss region starts |
+| `warmup` | 100 | Warmup bins before the loss region starts |
 | `neg_ratio` | 1.0 | Negative windows per positive window |
 | `neg_min_distance` | 100 | Minimum distance in bins from any postsynaptic spike for negatives |
 | `val_fraction` | 0.2 | Validation fraction |
@@ -642,7 +656,7 @@ Validation follows the same-neuron principle as the spike-only path:
 
 ### Model Design: `VoltageAugmentedPerNeuronLIF`
 
-`VoltageAugmentedPerNeuronLIF` keeps the same delayed-synapse structure as the spike-only model, but adds a learned postsynaptic bias term and supervises the latent membrane trace directly.
+`VoltageAugmentedPerNeuronLIF` keeps the same delayed-synapse structure as the spike-only model, adds a learned postsynaptic bias term, and supervises the latent membrane trace directly. It can optionally add reduced intrinsic slow states through `--slow-state-mode`; these inference states are biologically informed LIF terms, not a full ion-channel model.
 
 **Per-neuron learned parameters**
 
@@ -651,6 +665,8 @@ Validation follows the same-neuron principle as the spike-only path:
 | `W` | `[n_neurons, K]` | One learned weight per candidate presynaptic neuron |
 | `delay_logits` | `[n_neurons, K, max_delay]` | Learned discrete delay distribution for each candidate synapse |
 | `bias` | `[n_neurons]` | Learned postsynaptic bias current term |
+| `slow_adaptation_gain_raw` | `[n_neurons]` | Optional spike-triggered slow outward adaptation gain when `--slow-state-mode adaptation` or `adaptation_h` is active |
+| `h_current_gain_raw` | `[n_neurons]` | Optional reduced h-like inward current gain when `--slow-state-mode h` or `adaptation_h` is active |
 
 **Shared learned parameters**
 
@@ -672,6 +688,8 @@ spike_prob(t) = sigmoid(beta * (V(t) - threshold))
 V(t) = V(t) - reset_strength * spike_prob(t)
 ```
 
+When slow states are enabled, the inference model can add a spike-triggered adaptation current and/or a reduced h-like inward state. In `event_window` mode these states reset at the start of each sampled window. In `continuous_state` mode they are carried across ordered chunks and reset only at train/validation segment boundaries.
+
 ### Combined Loss Function
 
 The main loss is implemented by `compute_voltage_augmented_event_loss()`.
@@ -687,9 +705,9 @@ The function also tracks `n_voltage_points`, the number of valid voltage targets
 
 ### Training Procedure
 
-- Uses `VoltageEventWindowDataset` batches, where `--batch` means event windows per batch
-- Runs full-window BPTT for each short event window rather than long-sequence optimization
-- Computes spike loss only after the warmup region
+- Default `event_window` mode uses `VoltageEventWindowDataset` batches, where `--batch` means event windows per batch
+- Optional `continuous_state` mode processes ordered all-neuron chunks, carries membrane/adaptive-threshold/slow-state values across chunks, and detaches state between chunks for truncated BPTT
+- In event-window mode, computes spike loss only after the warmup region; in continuous-state mode, excludes only the warmup after each state reset plus configured excluded bins
 - Computes voltage loss only where the voltage-validity mask is true
 - Adds L1 sparsity to the learned candidate weights
 - Clips gradients to norm 1.0 every step
@@ -720,14 +738,14 @@ After training, the pipeline evaluates both held-out event windows and the assem
 - weight correlation on true connected edges
 - predicted true-positive sign accuracy
 
-Threshold selection still uses the best F1 point from the precision-recall curve, and the final connectivity export remains the full `[post, pre]` matrix assembled from the learned candidate weights.
+Threshold selection can use the retrospective label-aware `oracle_f1`, the global non-leaky `surrogate_fdr`, or the voltage-path row-calibrated `surrogate_fdr_per_neuron`. The final connectivity export remains the full `[post, pre]` matrix assembled from the learned candidate weights.
 
 ### Voltage Cleaning / Masking Controls
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--mask-pre-ms` | 1.0 | Mask duration before detected peaks |
-| `--mask-post-ms` | 5.0 | Mask duration after detected peaks |
+| `--mask-pre-ms` | 0.0 | Mask duration before detected peaks |
+| `--mask-post-ms` | 2.0 | Mask duration after detected peaks |
 | `--peak-threshold-mv` | 15.0 | Voltage threshold for peak masking |
 | `--voltage-lambda` | 1.0 | Weight on masked subthreshold voltage loss |
 
@@ -740,7 +758,7 @@ The voltage-augmented pipeline keeps the same main controls as the spike-only pa
 - single-recording vs all-recordings selection
 - standard optimization controls (`--epochs`, `--lr`, `--batch`, `--patience`, `--l1`, `--pos-weight`)
 
-In the current packaged implementation, `run_pipeline()` also stores the voltage-cleaning configuration and per-recording validity summaries inside the saved checkpoint so later sweeps and notebook analysis can recover how the voltage supervision was constructed.
+In the current packaged implementation, `run_pipeline()` also stores the voltage-cleaning configuration, per-recording validity summaries, and the event-window reconstruction settings inside the saved checkpoint so later sweeps, notebook analysis, and validation-voltage plotting can recover how the voltage supervision was constructed.
 
 ### CLI Reference
 
@@ -766,14 +784,20 @@ In the current packaged implementation, `run_pipeline()` also stores the voltage
 | `--candidate-spatial-frac` | 0.8 | Fraction of K reserved for spatial neighbors |
 | `--candidate-min-lag` | 1 | Minimum causal lag in bins |
 | `--candidate-max-lag` | uses `--max-delay` | Maximum causal lag in bins |
+| `--threshold-mode` | `adaptive` | Adaptive per-neuron threshold or shared threshold |
+| `--slow-state-mode` | `none` | Optional reduced intrinsic states: `none`, `adaptation`, `h`, or `adaptation_h` |
+| `--connectivity-threshold-mode` | `oracle_f1` | Edge cutoff mode: `oracle_f1`, `surrogate_fdr`, or voltage-only `surrogate_fdr_per_neuron` |
+| `--surrogate-fdr` | 0.005 | Target FDR for surrogate thresholding |
 | `--pre-context` | 50 | Event-window presynaptic history |
 | `--post-context` | 10 | Event-window post-spike context |
-| `--warmup` | 30 | Warmup bins before loss starts |
+| `--warmup` | 100 | Warmup bins before loss starts |
+| `--training-mode` | `event_window` | Legacy event windows or ordered `continuous_state` chunks |
+| `--continuous-chunk-len` | 250 | Chunk length for truncated BPTT in continuous-state mode |
 | `--neg-ratio` | 1.0 | Negative windows per positive window |
 | `--neg-min-dist` | 100 | Minimum distance from any postsynaptic spike for negatives |
 | `--val-fraction` | 0.2 | Validation fraction |
-| `--mask-pre-ms` | 1.0 | Mask duration before peaks |
-| `--mask-post-ms` | 5.0 | Mask duration after peaks |
+| `--mask-pre-ms` | 0.0 | Mask duration before peaks |
+| `--mask-post-ms` | 2.0 | Mask duration after peaks |
 | `--peak-threshold-mv` | 15.0 | Peak masking threshold |
 
 ---
@@ -826,8 +850,45 @@ python -m scripts.run_voltage_lambda_sweep --session "LIF data/<timestamp>" --la
 | `--neg-min-dist` | 100 | Minimum distance from any postsynaptic spike for negatives |
 | `--val-fraction` | 0.2 | Validation fraction |
 | `--mask-pre-ms` | 1.0 | Mask duration before peaks |
-| `--mask-post-ms` | 5.0 | Mask duration after peaks |
+| `--mask-post-ms` | 2.0 | Mask duration after peaks |
 | `--peak-threshold-mv` | 15.0 | Peak masking threshold |
+
+---
+
+## `scripts/plot_voltage_validation_predictions.py` — Held-Out Voltage Prediction Plots
+
+**Usage**
+
+```text
+python -m scripts.plot_voltage_validation_predictions --checkpoint "voltage_augmented_learned_lif_outputs/voltage_augmented_learned_lif_<output_name>.pt"
+python -m scripts.plot_voltage_validation_predictions --checkpoint "...pt" --session "LIF data/<timestamp>" --max-windows 8 --device cpu
+python -m scripts.plot_voltage_validation_predictions --checkpoint "...pt" --spike-threshold 0.10 --max-heatmap-rows 200
+python -m scripts.plot_voltage_validation_predictions --checkpoint "...pt" --spike-threshold-surrogates 1 --spike-threshold-max-bins 5000 --timeline-batch-neurons 8
+```
+
+**Purpose**
+- Rebuilds the held-out validation split for a saved voltage-augmented checkpoint.
+- Runs the saved model on those validation windows.
+- Runs the saved model across the held-out validation recordings themselves so it can build a true spike-train-style raster over concatenated validation time, with each neuron occupying two adjacent rows: actual spikes above inferred spike calls.
+- Calibrates inferred spike calls for visualization with a label-free surrogate-FDR threshold built from circularly shifted validation spike surrogates rather than from validation labels.
+- Keeps the composite validation figure for window-level diagnostics: an event-aligned average across positive windows, a positive-window spike-probability heatmap sorted by spike-prediction quality, and representative window panels that keep the voltage overlays alongside spike behavior.
+- Exports the raw per-window validation predictions for later notebook analysis.
+
+**Main Outputs**
+
+- `voltage_augmented_learned_lif_outputs/<checkpoint_stem>_validation_spike_raster.png` — true held-out validation-time spike raster with paired actual/predicted rows per neuron, surrogate-thresholded inferred calls, recording-boundary separators, and a `+/- 2 ms` onset-tolerance summary for predicted-call timing
+- `voltage_augmented_learned_lif_outputs/<checkpoint_stem>_validation_voltage.png` — composite window-level figure with the averaged-by-neuron spike profile, positive-window event average, spike-probability heatmap, and representative voltage-plus-spike windows
+- `voltage_augmented_learned_lif_outputs/<checkpoint_stem>_validation_voltage_predictions.npz` — per-window predicted spike probabilities, thresholded spike calls, predicted voltage, target voltage, masks, postsynaptic spikes, per-window spike-quality scores, and metadata
+- `voltage_augmented_learned_lif_outputs/<checkpoint_stem>_validation_voltage_summary.json` — reconstruction settings plus aggregate validation-voltage metrics, validation-spike metrics, the surrogate-calibrated spike-call threshold, validation-timeline tolerant spike-timing metrics, and selected representative-window indices
+
+**Notes**
+
+- The script prefers the event-window reconstruction settings saved inside newer checkpoints.
+- If `--spike-threshold` is omitted, the script now defaults to a non-leaky `surrogate_fdr` spike threshold for visualization. It builds circular-shift spike surrogates within held-out validation recordings, runs the saved model on those surrogate timelines, and chooses the loosest spike-probability cutoff whose estimated null-selection rate stays below the requested FDR target.
+- The raster timing summary uses `--spike-onset-tolerance-ms` to report whether a thresholded predicted call lands within a symmetric onset window around an actual spike; the default is `+/- 2 ms`.
+- `--spike-threshold-max-bins` caps the number of observed and surrogate spike-probability bins used during surrogate calibration so the validation-timeline raster remains practical on all-recordings runs.
+- `--max-heatmap-rows` can cap the number of positive validation windows shown in the sorted heatmap when a full all-recordings run would otherwise make the figure too tall or dense.
+- Older checkpoints that predate those saved settings still work when the original run used defaults; for non-default older runs, pass the window and masking overrides explicitly on the CLI.
 
 ---
 

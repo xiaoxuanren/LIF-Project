@@ -284,12 +284,15 @@ def train_single_lambda(args, shared, voltage_lambda, output_dir, base_stem):
         {
             'model_state_dict': model.state_dict(),
             'K': shared['k_actual'],
+            'T': int(shared['data']['spike_matrix'].shape[1]),
+            'dt': float(args.dt),
             'max_delay': args.max_delay,
             'n_neurons': shared['n_neurons'],
             'session_name': session_name,
             'output_name': output_name,
             'validation_strategy': shared['validation_strategy'],
             'candidate_info': shared['candidate_info'],
+            'threshold_mode': model.threshold_mode,
             'neighbor_indices': shared['neighbor_indices'],
             'connectivity_matrix': conn_matrix,
             'results_window_val': val_window_results,
@@ -298,6 +301,20 @@ def train_single_lambda(args, shared, voltage_lambda, output_dir, base_stem):
             'val_history': val_history,
             'connectivity_aucs': conn_aucs,
             'recording_summaries': shared['data']['recording_summaries'],
+            'window_config': {
+                'pre_context': int(args.pre_context),
+                'post_context': int(args.post_context),
+                'warmup': int(args.warmup),
+                'neg_ratio': float(args.neg_ratio),
+                'neg_min_distance': int(args.neg_min_dist),
+                'val_fraction': float(args.val_fraction),
+                'rng_seed': 42,
+            },
+            'data_config': {
+                'use_all_recordings': True,
+                'recording_idx': 0,
+                'subsample_T': None,
+            },
             'voltage_cleaning': {
                 'mask_pre_ms': args.mask_pre_ms,
                 'mask_post_ms': args.mask_post_ms,
@@ -489,11 +506,13 @@ def main():
     parser.add_argument('--candidate-max-lag', type=int, default=None)
     parser.add_argument('--pre-context', type=int, default=50)
     parser.add_argument('--post-context', type=int, default=10)
-    parser.add_argument('--warmup', type=int, default=30)
+    parser.add_argument('--warmup', type=int, default=100,
+                        help='Leading bins simulated per window but excluded from the loss, giving slow membrane/adaptation state time to settle before the scored region')
     parser.add_argument('--neg-ratio', type=float, default=1.0)
     parser.add_argument('--neg-min-dist', type=int, default=100)
     parser.add_argument('--val-fraction', type=float, default=0.2)
-    parser.add_argument('--mask-pre-ms', type=float, default=1.0)
+    parser.add_argument('--mask-pre-ms', type=float, default=0.0,
+                        help='Voltage masked before each spike; default 0.0 keeps the pre-spike depolarization ramp as a supervised timing target')
     parser.add_argument('--mask-post-ms', type=float, default=2.0)
     parser.add_argument('--peak-threshold-mv', type=float, default=15.0)
     args = parser.parse_args()

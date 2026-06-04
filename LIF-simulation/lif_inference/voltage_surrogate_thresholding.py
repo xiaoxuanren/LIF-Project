@@ -19,11 +19,12 @@ def estimate_surrogate_connectivity_score_sets(
         boundaries=None, excluded_bins=None, val_fraction=0.2,
         device='cpu', n_surrogates=4, surrogate_epochs=2,
         surrogate_patience=1, surrogate_min_shift_fraction=0.10,
-        surrogate_seed=1234):
+        surrogate_seed=1234, model_kwargs=None):
     """Fit lightweight null models on circular-shift spike+voltage surrogates."""
     rng = np.random.default_rng(surrogate_seed)
     all_neuron_ids = np.arange(n_neurons)
     score_sets = []
+    model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
 
     for surrogate_idx in range(int(n_surrogates)):
         surrogate_spike_matrix, surrogate_voltage_matrix, surrogate_voltage_mask = (
@@ -63,6 +64,7 @@ def estimate_surrogate_connectivity_score_sets(
             K=K_actual,
             max_delay=max_delay,
             threshold_mode=threshold_mode,
+            **model_kwargs,
         ).to(device)
         optimizer = torch.optim.Adam(surrogate_model.parameters(), lr=lr, weight_decay=1e-5)
 

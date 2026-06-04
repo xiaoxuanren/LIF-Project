@@ -113,14 +113,15 @@ For a first inference run:
 Equivalent CLI entry points remain available through thin wrappers:
 
 ```powershell
-python -m lif_inference.learned_lif_connectivity --session "LIF data/<timestamp>" --k 50 --epochs 40 --batch 128 --max-delay 8
+python -m lif_inference.learned_lif_connectivity --session "LIF data/<timestamp>" --k 100 --epochs 40 --batch 128 --max-delay 8 --exclude-detected-bursts
 python -m lif_inference.voltage_augmented_learned_lif_connectivity --session "LIF data/<timestamp>" --k 50 --epochs 40 --batch 128 --max-delay 8
+python -m lif_inference.voltage_augmented_learned_lif_connectivity --session "LIF data/<timestamp>" --training-mode continuous_state --slow-state-mode adaptation_h --connectivity-threshold-mode surrogate_fdr_per_neuron
 python -m scripts.run_voltage_lambda_sweep --session "LIF data/<timestamp>" --lambdas 0.25,0.5,1.0,2.0
 ```
 
 The voltage-augmented learned-LIF CLI and the voltage-lambda sweep now infer `dt` from `session_metadata.json` when `--dt` is omitted, so full-dt voltage sessions no longer require a manual override in the common case. When you explicitly pass a coarser `dt` that is an integer multiple of the saved voltage sample rate, the loader now keeps spike masking at the native voltage resolution and then downsamples the cleaned voltage targets into the requested bins.
 
-For reset-only saved traces, the voltage-augmented defaults now keep `mask_pre_ms=1.0` and shorten `mask_post_ms` to `2.0` so more of the post-reset relaxation remains supervised.
+The voltage-augmented defaults now use `mask_pre_ms=0.0`, `mask_post_ms=2.0`, and `warmup=100`: the pre-spike depolarization ramp remains supervised, while the spike bin and brief post-spike reset region stay masked. The default training mode remains `event_window` for parity with earlier runs, but `--training-mode continuous_state` carries membrane, adaptive-threshold, and optional slow-state values through ordered recording chunks. `--slow-state-mode adaptation|h|adaptation_h` adds reduced intrinsic slow states to the inference model, and `--connectivity-threshold-mode surrogate_fdr_per_neuron` calibrates non-leaky row-specific edge cutoffs for real-data-style thresholding without ground-truth labels.
 
 The package-level import surface is:
 

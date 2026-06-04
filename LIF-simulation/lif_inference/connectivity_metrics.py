@@ -21,6 +21,33 @@ def flatten_candidate_scores(conn_matrix, neighbor_indices, neuron_ids=None,
     return np.concatenate(all_scores).astype(np.float32, copy=False)
 
 
+def flatten_candidate_score_table(conn_matrix, neighbor_indices, neuron_ids=None,
+                                  absolute=True):
+    """Flatten candidate scores with aligned postsynaptic and presynaptic ids."""
+    if neuron_ids is None:
+        neuron_ids = np.arange(conn_matrix.shape[0])
+
+    all_scores = []
+    all_post_ids = []
+    all_pre_ids = []
+    for neuron_id in np.asarray(neuron_ids, dtype=np.int32):
+        pre_ids = np.asarray(neighbor_indices[neuron_id], dtype=np.int32)
+        row_scores = np.asarray(conn_matrix[neuron_id, pre_ids])
+        row_scores = np.abs(row_scores) if absolute else row_scores
+        all_scores.append(row_scores)
+        all_post_ids.append(np.full(len(pre_ids), int(neuron_id), dtype=np.int32))
+        all_pre_ids.append(pre_ids)
+
+    if not all_scores:
+        empty = np.empty(0, dtype=np.float32)
+        return empty, empty.astype(np.int32), empty.astype(np.int32)
+    return (
+        np.concatenate(all_scores).astype(np.float32, copy=False),
+        np.concatenate(all_post_ids).astype(np.int32, copy=False),
+        np.concatenate(all_pre_ids).astype(np.int32, copy=False),
+    )
+
+
 def compute_binary_classification_metrics(labels, predicted):
     """Compute confusion counts plus precision, recall, and F1."""
     labels = np.asarray(labels).astype(np.int32, copy=False)
@@ -45,10 +72,33 @@ def compute_binary_classification_metrics(labels, predicted):
     }
 
 
+def _select_surrogate_fdr_threshold(scores, surrogate_score_sets, surrogate_fdr):
+    """Choose the loosest scalar threshold satisfying a surrogate FDR target."""
+    chosen_threshold = float('inf')
+    chosen_selected = 0
+    chosen_expected_null = 0.0
+    chosen_estimated_fdr = 0.0
+
+    for threshold in np.unique(scores)[::-1]:
+        observed_selected = int(np.sum(scores >= threshold))
+        if observed_selected <= 0:
+            continue
+        expected_null_selected = float(np.mean(np.sum(surrogate_score_sets >= threshold, axis=1)))
+        estimated_fdr = float(expected_null_selected / observed_selected)
+        if estimated_fdr <= float(surrogate_fdr):
+            chosen_threshold = float(threshold)
+            chosen_selected = observed_selected
+            chosen_expected_null = expected_null_selected
+            chosen_estimated_fdr = estimated_fdr
+
+    return chosen_threshold, chosen_selected, chosen_expected_null, chosen_estimated_fdr
+
+
 def select_connectivity_threshold(labels, scores, mode='oracle_f1',
                                   surrogate_score_sets=None,
                                   surrogate_fdr=0.005,
-                                  default_threshold=0.5):
+                                  default_threshold=0.5,
+                                  score_neuron_ids=None):
     """Choose a connectivity cutoff from labels or surrogate null scores."""
     labels = np.asarray(labels, dtype=np.int32)
     scores = np.asarray(scores, dtype=np.float64)
@@ -76,10 +126,10 @@ def select_connectivity_threshold(labels, scores, mode='oracle_f1',
             'selected_edges': int(np.sum(scores >= best_thresh)),
         }
 
-    if mode != 'surrogate_fdr':
+    if mode not in {'surrogate_fdr', 'surrogate_fdr_per_neuron'}:
         raise ValueError(
             f'Unsupported connectivity_threshold_mode={mode!r}; '
-            "use 'oracle_f1' or 'surrogate_fdr'"
+            "use 'oracle_f1', 'surrogate_fdr', or 'surrogate_fdr_per_neuron'"
         )
 
     if surrogate_score_sets is None:
@@ -91,32 +141,76 @@ def select_connectivity_threshold(labels, scores, mode='oracle_f1',
     if surrogate_score_sets.ndim != 2 or surrogate_score_sets.size == 0:
         raise ValueError('surrogate_score_sets must be a non-empty 1D or 2D array')
 
-    chosen_threshold = float('inf')
-    chosen_selected = 0
-    chosen_expected_null = 0.0
-    chosen_estimated_fdr = 0.0
+    if mode == 'surrogate_fdr':
+        chosen_threshold, chosen_selected, chosen_expected_null, chosen_estimated_fdr = (
+            _select_surrogate_fdr_threshold(scores, surrogate_score_sets, surrogate_fdr)
+        )
 
-    for threshold in np.unique(scores)[::-1]:
-        observed_selected = int(np.sum(scores >= threshold))
-        if observed_selected <= 0:
+        return {
+            'threshold': chosen_threshold,
+            'connectivity_threshold_mode': 'surrogate_fdr',
+            'estimated_fdr': chosen_estimated_fdr,
+            'expected_null_selected': chosen_expected_null,
+            'selected_edges': chosen_selected,
+            'surrogate_fdr_target': float(surrogate_fdr),
+            'surrogate_n_models': int(surrogate_score_sets.shape[0]),
+            'surrogate_edges_per_model': int(surrogate_score_sets.shape[1]),
+        }
+
+    if score_neuron_ids is None:
+        raise ValueError('score_neuron_ids are required for surrogate_fdr_per_neuron thresholding')
+    score_neuron_ids = np.asarray(score_neuron_ids, dtype=np.int32)
+    if score_neuron_ids.shape[0] != scores.shape[0]:
+        raise ValueError('score_neuron_ids must align with flattened scores')
+    if surrogate_score_sets.shape[1] != scores.shape[0]:
+        raise ValueError('per-neuron surrogate FDR expects surrogate scores aligned with observed scores')
+
+    unique_neuron_ids = np.unique(score_neuron_ids)
+    per_neuron_thresholds = np.full(unique_neuron_ids.shape, np.inf, dtype=np.float64)
+    per_neuron_selected = np.zeros(unique_neuron_ids.shape, dtype=np.int32)
+    per_neuron_expected_null = np.zeros(unique_neuron_ids.shape, dtype=np.float64)
+    per_neuron_estimated_fdr = np.zeros(unique_neuron_ids.shape, dtype=np.float64)
+    per_score_thresholds = np.full(scores.shape, np.inf, dtype=np.float64)
+
+    for idx, neuron_id in enumerate(unique_neuron_ids):
+        mask = score_neuron_ids == int(neuron_id)
+        if not np.any(mask):
             continue
-        expected_null_selected = float(np.mean(np.sum(surrogate_score_sets >= threshold, axis=1)))
-        estimated_fdr = float(expected_null_selected / observed_selected)
-        if estimated_fdr <= float(surrogate_fdr):
-            chosen_threshold = float(threshold)
-            chosen_selected = observed_selected
-            chosen_expected_null = expected_null_selected
-            chosen_estimated_fdr = estimated_fdr
+        row_threshold, row_selected, row_expected_null, row_estimated_fdr = (
+            _select_surrogate_fdr_threshold(
+                scores[mask],
+                surrogate_score_sets[:, mask],
+                surrogate_fdr,
+            )
+        )
+        per_neuron_thresholds[idx] = row_threshold
+        per_neuron_selected[idx] = row_selected
+        per_neuron_expected_null[idx] = row_expected_null
+        per_neuron_estimated_fdr[idx] = row_estimated_fdr
+        per_score_thresholds[mask] = row_threshold
+
+    selected_total = int(np.sum(per_neuron_selected))
+    expected_null_total = float(np.sum(per_neuron_expected_null))
+    estimated_fdr_total = float(expected_null_total / selected_total) if selected_total > 0 else 0.0
+    finite_thresholds = per_neuron_thresholds[np.isfinite(per_neuron_thresholds)]
+    summary_threshold = float(np.median(finite_thresholds)) if finite_thresholds.size > 0 else float('inf')
 
     return {
-        'threshold': chosen_threshold,
-        'connectivity_threshold_mode': 'surrogate_fdr',
-        'estimated_fdr': chosen_estimated_fdr,
-        'expected_null_selected': chosen_expected_null,
-        'selected_edges': chosen_selected,
+        'threshold': summary_threshold,
+        'connectivity_threshold_mode': 'surrogate_fdr_per_neuron',
+        'estimated_fdr': estimated_fdr_total,
+        'expected_null_selected': expected_null_total,
+        'selected_edges': selected_total,
         'surrogate_fdr_target': float(surrogate_fdr),
         'surrogate_n_models': int(surrogate_score_sets.shape[0]),
         'surrogate_edges_per_model': int(surrogate_score_sets.shape[1]),
+        'score_neuron_ids': score_neuron_ids,
+        'per_score_thresholds': per_score_thresholds,
+        'per_neuron_ids': unique_neuron_ids,
+        'per_neuron_thresholds': per_neuron_thresholds,
+        'per_neuron_selected_edges': per_neuron_selected,
+        'per_neuron_expected_null_selected': per_neuron_expected_null,
+        'per_neuron_estimated_fdr': per_neuron_estimated_fdr,
     }
 
 
@@ -135,6 +229,7 @@ def evaluate_connectivity(model, neighbor_indices, true_binary, neuron_ids=None,
 
     all_scores = []
     all_labels = []
+    all_score_neuron_ids = []
 
     for neuron_id in neuron_ids:
         pre_ids = neighbor_indices[neuron_id]
@@ -142,9 +237,11 @@ def evaluate_connectivity(model, neighbor_indices, true_binary, neuron_ids=None,
         labels = true_binary[neuron_id, pre_ids].astype(np.float32)
         all_scores.append(scores)
         all_labels.append(labels)
+        all_score_neuron_ids.append(np.full(len(pre_ids), int(neuron_id), dtype=np.int32))
 
     scores = np.concatenate(all_scores)
     labels = np.concatenate(all_labels)
+    score_neuron_ids = np.concatenate(all_score_neuron_ids)
 
     results = {}
     if len(np.unique(labels)) > 1:
@@ -158,9 +255,13 @@ def evaluate_connectivity(model, neighbor_indices, true_binary, neuron_ids=None,
             surrogate_score_sets=surrogate_score_sets,
             surrogate_fdr=surrogate_fdr,
             default_threshold=0.5,
+            score_neuron_ids=score_neuron_ids,
         )
         predicted = np.zeros_like(labels, dtype=np.int32)
-        if np.isfinite(threshold_info['threshold']):
+        per_score_thresholds = threshold_info.get('per_score_thresholds')
+        if per_score_thresholds is not None:
+            predicted = (scores >= np.asarray(per_score_thresholds, dtype=np.float64)).astype(np.int32)
+        elif np.isfinite(threshold_info['threshold']):
             predicted = (scores >= threshold_info['threshold']).astype(np.int32)
 
         results.update(threshold_info)

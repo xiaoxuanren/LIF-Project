@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import torch
@@ -131,7 +132,7 @@ def ms_to_bins(time_ms, sample_rate_ms):
 
 
 def preprocess_voltage_recording(voltage_traces, spike_times, sample_rate_ms,
-                                 mask_pre_ms=1.0, mask_post_ms=2.0,
+                                 mask_pre_ms=0.0, mask_post_ms=2.0,
                                  peak_threshold_mv=15.0):
     """Mask spike neighborhoods and normalize voltage traces for subthreshold supervision.
 
@@ -292,7 +293,7 @@ def resolve_voltage_trace_array(data, recording_path=None):
 
 
 def load_all_recordings_with_voltage(session_dir, dt=1.0,
-                                    mask_pre_ms=1.0, mask_post_ms=2.0,
+                                    mask_pre_ms=0.0, mask_post_ms=2.0,
                                     peak_threshold_mv=15.0):
     """Load, clean, and concatenate all voltage-enabled recordings from one session.
 
@@ -420,7 +421,7 @@ class VoltageEventWindowDataset(Dataset):
     """
 
     def __init__(self, spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
-                 neuron_ids=None, pre_context=50, post_context=10, warmup=30,
+                 neuron_ids=None, pre_context=50, post_context=10, warmup=100,
                  neg_ratio=1.0, neg_min_distance=100, boundaries=None,
                  excluded_bins=None,
                  rng_seed=42, windows=None):
@@ -530,7 +531,7 @@ class VoltageEventWindowDataset(Dataset):
 
 def build_train_val_voltage_datasets(spike_matrix, voltage_matrix, voltage_mask,
                                      neighbor_indices, neuron_ids,
-                                     pre_context=50, post_context=10, warmup=30,
+                                     pre_context=50, post_context=10, warmup=100,
                                      neg_ratio=1.0, neg_min_distance=100,
                                      boundaries=None, excluded_bins=None,
                                      val_fraction=0.2,
@@ -560,6 +561,7 @@ def build_train_val_voltage_datasets(spike_matrix, voltage_matrix, voltage_mask,
     train_boundaries, val_boundaries = split_recording_boundaries(boundaries, val_fraction)
 
     if val_boundaries is not None:
+        assert train_boundaries is not None
         train_ds = VoltageEventWindowDataset(
             spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
             neuron_ids=neuron_ids,
@@ -617,7 +619,8 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         connectivity, delays, bias, and adaptive threshold dynamics.
     """
 
-    def __init__(self, n_neurons, K, max_delay=5, threshold_mode='adaptive'):
+    def __init__(self, n_neurons, K, max_delay=5, threshold_mode='adaptive',
+                 slow_state_mode='none'):
         """Initialize the voltage-augmented learned-LIF model parameters.
 
         Args:
@@ -634,9 +637,15 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         self.K = K
         self.max_delay = max_delay
         self.threshold_mode = str(threshold_mode).strip().lower()
+        self.slow_state_mode = str(slow_state_mode).strip().lower()
         if self.threshold_mode not in {'adaptive', 'shared'}:
             raise ValueError(
                 f"Unsupported threshold_mode={threshold_mode!r}; use 'adaptive' or 'shared'"
+            )
+        if self.slow_state_mode not in {'none', 'adaptation', 'h', 'adaptation_h'}:
+            raise ValueError(
+                f"Unsupported slow_state_mode={slow_state_mode!r}; "
+                "use 'none', 'adaptation', 'h', or 'adaptation_h'"
             )
 
         self.W = nn.Parameter(torch.zeros(n_neurons, K))
@@ -657,6 +666,34 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         self.beta = nn.Parameter(torch.tensor(5.0))
         self.reset_strength = nn.Parameter(torch.tensor(2.0))
 
+        if self.uses_slow_adaptation:
+            self.slow_adaptation_gain_raw = nn.Parameter(torch.full((n_neurons,), -6.0))
+            self.slow_adaptation_decay_logit = nn.Parameter(torch.tensor(4.0))
+        else:
+            self.slow_adaptation_gain_raw = None
+            self.slow_adaptation_decay_logit = None
+
+        if self.uses_h_current:
+            self.h_current_gain_raw = nn.Parameter(torch.full((n_neurons,), -6.0))
+            self.h_decay_logit = nn.Parameter(torch.tensor(5.0))
+            self.h_activation_midpoint = nn.Parameter(torch.tensor(0.0))
+            self.h_activation_slope_raw = nn.Parameter(torch.tensor(1.0))
+        else:
+            self.h_current_gain_raw = None
+            self.h_decay_logit = None
+            self.h_activation_midpoint = None
+            self.h_activation_slope_raw = None
+
+    @property
+    def uses_slow_adaptation(self):
+        """Return whether a spike-triggered slow adaptation current is active."""
+        return self.slow_state_mode in {'adaptation', 'adaptation_h'}
+
+    @property
+    def uses_h_current(self):
+        """Return whether the reduced h-like inward state is active."""
+        return self.slow_state_mode in {'h', 'adaptation_h'}
+
     @property
     def alpha(self):
         """Return the membrane leak factor constrained to the open interval ``(0, 1)``.
@@ -673,21 +710,27 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
     def threshold(self):
         """Return the shared threshold or mean adaptive baseline threshold."""
         if self.threshold_mode == 'adaptive':
+            assert self.threshold_base is not None
             return self.threshold_base.mean()
+        assert self.shared_threshold is not None
         return self.shared_threshold
 
     @property
     def threshold_base_values(self):
         """Return per-neuron threshold baselines for logging and saving."""
         if self.threshold_mode == 'adaptive':
+            assert self.threshold_base is not None
             return self.threshold_base
+        assert self.shared_threshold is not None
         return self.shared_threshold.expand(self.n_neurons)
 
     @property
     def threshold_increment(self):
         """Return the positive spike-triggered threshold increment per neuron."""
         if self.threshold_mode == 'adaptive':
+            assert self.threshold_increment_raw is not None
             return F.softplus(self.threshold_increment_raw)
+        assert self.shared_threshold is not None
         return torch.zeros(
             self.n_neurons,
             device=self.shared_threshold.device,
@@ -698,10 +741,53 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
     def threshold_decay(self):
         """Return the shared adaptive-threshold decay constrained to ``(0, 1)``."""
         if self.threshold_mode == 'adaptive':
+            assert self.threshold_decay_logit is not None
             return torch.sigmoid(self.threshold_decay_logit)
+        assert self.shared_threshold is not None
         return self.shared_threshold.new_tensor(0.0)
 
-    def forward(self, pre_spikes, post_spikes, neuron_ids, tbptt_len=1000):
+    @property
+    def slow_adaptation_gain(self):
+        """Return positive spike-triggered slow adaptation gains per neuron."""
+        if self.uses_slow_adaptation:
+            assert self.slow_adaptation_gain_raw is not None
+            return F.softplus(self.slow_adaptation_gain_raw)
+        return torch.zeros(self.n_neurons, device=self.bias.device, dtype=self.bias.dtype)
+
+    @property
+    def slow_adaptation_decay(self):
+        """Return the slow adaptation decay constrained to ``(0, 1)``."""
+        if self.uses_slow_adaptation:
+            assert self.slow_adaptation_decay_logit is not None
+            return torch.sigmoid(self.slow_adaptation_decay_logit)
+        return self.bias.new_tensor(0.0)
+
+    @property
+    def h_current_gain(self):
+        """Return positive gains for the reduced h-like inward current."""
+        if self.uses_h_current:
+            assert self.h_current_gain_raw is not None
+            return F.softplus(self.h_current_gain_raw)
+        return torch.zeros(self.n_neurons, device=self.bias.device, dtype=self.bias.dtype)
+
+    @property
+    def h_decay(self):
+        """Return the reduced h-like state decay constrained to ``(0, 1)``."""
+        if self.uses_h_current:
+            assert self.h_decay_logit is not None
+            return torch.sigmoid(self.h_decay_logit)
+        return self.bias.new_tensor(0.0)
+
+    @property
+    def h_activation_slope(self):
+        """Return the positive slope for h-state activation by low voltage."""
+        if self.uses_h_current:
+            assert self.h_activation_slope_raw is not None
+            return F.softplus(self.h_activation_slope_raw)
+        return self.bias.new_tensor(0.0)
+
+    def forward(self, pre_spikes, post_spikes, neuron_ids, tbptt_len=1000,
+                initial_state=None, return_state=False):
         """Simulate spike probabilities and membrane voltages for a batch of event windows.
 
         Args:
@@ -710,10 +796,14 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
                 for API compatibility with the spike-only model.
             neuron_ids: Batch of postsynaptic neuron indices used to gather parameters.
             tbptt_len: Chunk length used for truncated backpropagation through time.
+            initial_state: Optional dictionary containing carried ``v``,
+                ``threshold_adapt``, ``slow_adapt``, and ``h_state`` tensors.
+            return_state: Whether to return the final simulated state.
 
         Returns:
             A tuple of predicted spike probabilities, predicted voltages, and the
-            learned candidate weights for the batch's postsynaptic neurons.
+            learned candidate weights for the batch's postsynaptic neurons. When
+            ``return_state`` is true, a final-state dictionary is appended.
         """
         del post_spikes
         B, K, T = pre_spikes.shape
@@ -740,11 +830,24 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         threshold_increment = self.threshold_increment[neuron_ids]
         threshold_decay = self.threshold_decay
         reset = F.softplus(self.reset_strength)
+        slow_adaptation_gain = self.slow_adaptation_gain[neuron_ids]
+        slow_adaptation_decay = self.slow_adaptation_decay
+        h_current_gain = self.h_current_gain[neuron_ids]
+        h_decay = self.h_decay
+        h_activation_midpoint = self.h_activation_midpoint if self.uses_h_current else None
+        h_activation_slope = self.h_activation_slope
+
+        def init_state(name):
+            if initial_state is not None and name in initial_state and initial_state[name] is not None:
+                return initial_state[name].to(device=device, dtype=pre_spikes.dtype).reshape(B)
+            return torch.zeros(B, device=device, dtype=pre_spikes.dtype)
 
         spike_probs_list = []
         voltages_list = []
-        v = torch.zeros(B, device=device)
-        threshold_adapt = torch.zeros(B, device=device)
+        v = init_state('v')
+        threshold_adapt = init_state('threshold_adapt')
+        slow_adapt = init_state('slow_adapt')
+        h_state = init_state('h_state')
 
         for chunk_start in range(0, T, tbptt_len):
             chunk_end = min(chunk_start + tbptt_len, T)
@@ -753,23 +856,44 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
 
             v = v.detach()
             threshold_adapt = threshold_adapt.detach()
+            slow_adapt = slow_adapt.detach()
+            h_state = h_state.detach()
             sp_chunk = torch.zeros(B, chunk_len, device=device)
             v_chunk = torch.zeros(B, chunk_len, device=device)
 
             for t in range(chunk_len):
-                v = alpha * v + I_chunk[:, t]
+                intrinsic_current = I_chunk[:, t]
+                if self.uses_slow_adaptation:
+                    intrinsic_current = intrinsic_current - slow_adapt
+                if self.uses_h_current:
+                    intrinsic_current = intrinsic_current + h_current_gain * h_state
+                v = alpha * v + intrinsic_current
                 dynamic_threshold = threshold_base + threshold_adapt
                 s = torch.sigmoid(beta * (v - dynamic_threshold))
                 sp_chunk[:, t] = s
                 v_chunk[:, t] = v
                 threshold_adapt = threshold_decay * threshold_adapt + threshold_increment * s
+                if self.uses_slow_adaptation:
+                    slow_adapt = slow_adaptation_decay * slow_adapt + slow_adaptation_gain * s
                 v = v - reset * s
+                if self.uses_h_current:
+                    assert h_activation_midpoint is not None
+                    h_activation = torch.sigmoid(h_activation_slope * (h_activation_midpoint - v))
+                    h_state = h_decay * h_state + (1.0 - h_decay) * h_activation
 
             spike_probs_list.append(sp_chunk)
             voltages_list.append(v_chunk)
 
         spike_probs = torch.cat(spike_probs_list, dim=1)
         voltages = torch.cat(voltages_list, dim=1)
+        if return_state:
+            final_state = {
+                'v': v,
+                'threshold_adapt': threshold_adapt,
+                'slow_adapt': slow_adapt,
+                'h_state': h_state,
+            }
+            return spike_probs, voltages, w, final_state
         return spike_probs, voltages, w
 
     def get_connectivity_matrix(self, neighbor_indices):
@@ -988,6 +1112,317 @@ def evaluate_event_windows(model, dataloader, device, warmup,
     }
 
 
+def build_continuous_train_val_boundaries(boundaries, total_bins, val_fraction=0.2):
+    """Return train/validation boundaries for ordered continuous-state fitting."""
+    train_boundaries, val_boundaries = split_recording_boundaries(boundaries, val_fraction)
+    if val_boundaries is not None:
+        return np.asarray(train_boundaries, dtype=np.int32), np.asarray(val_boundaries, dtype=np.int32)
+
+    if val_fraction <= 0 or total_bins < 4:
+        return np.asarray(boundaries, dtype=np.int32), None
+
+    split_bin = int(round(total_bins * (1.0 - float(val_fraction))))
+    split_bin = min(max(split_bin, 1), total_bins - 1)
+    return (
+        np.asarray([0, split_bin], dtype=np.int32),
+        np.asarray([split_bin, total_bins], dtype=np.int32),
+    )
+
+
+def build_continuous_loss_mask(total_bins, boundaries, excluded_bins=None, warmup=100):
+    """Build a time-bin mask for continuous loss, resetting warmup only at segment starts."""
+    mask = np.ones(int(total_bins), dtype=np.float32)
+    if excluded_bins is not None and len(excluded_bins) > 0:
+        excluded_bins = np.asarray(excluded_bins, dtype=np.int64)
+        excluded_bins = excluded_bins[(excluded_bins >= 0) & (excluded_bins < total_bins)]
+        mask[excluded_bins] = 0.0
+
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        warmup_end = min(int(end), int(start) + max(int(warmup), 0))
+        if warmup_end > int(start):
+            mask[int(start):warmup_end] = 0.0
+    return mask
+
+
+def iter_continuous_segments(boundaries):
+    """Yield non-empty recording or validation segments from a boundary vector."""
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        start = int(start)
+        end = int(end)
+        if end > start:
+            yield start, end
+
+
+def make_continuous_chunk_tensors(spike_matrix, voltage_matrix, voltage_mask,
+                                  loss_mask, neighbor_indices, neuron_ids,
+                                  start, end, device):
+    """Slice one ordered continuous chunk for all requested postsynaptic neurons."""
+    neuron_ids = np.asarray(neuron_ids, dtype=np.int64)
+    neighbor_array = np.asarray(neighbor_indices, dtype=np.int64)
+    pre_ids = neighbor_array[neuron_ids]
+    pre_spikes = torch.from_numpy(spike_matrix[pre_ids, start:end].astype(np.float32)).to(device)
+    post_spikes = torch.from_numpy(spike_matrix[neuron_ids, start:end].astype(np.float32)).to(device)
+    post_voltage = torch.from_numpy(voltage_matrix[neuron_ids, start:end].astype(np.float32)).to(device)
+    post_voltage_mask = torch.from_numpy(voltage_mask[neuron_ids, start:end].astype(np.float32)).to(device)
+    chunk_loss_mask = torch.from_numpy(loss_mask[start:end].astype(np.float32)).to(device)
+    chunk_loss_mask = chunk_loss_mask.unsqueeze(0).expand(len(neuron_ids), -1)
+    neuron_ids_tensor = torch.from_numpy(neuron_ids.astype(np.int64)).to(device)
+    return pre_spikes, post_spikes, post_voltage, post_voltage_mask, chunk_loss_mask, neuron_ids_tensor
+
+
+def compute_voltage_augmented_continuous_loss(spike_probs, predicted_voltage,
+                                              post_spikes, target_voltage,
+                                              target_voltage_mask, loss_mask,
+                                              weights, pos_weight=5.0,
+                                              l1_lambda=0.01,
+                                              voltage_lambda=1.0):
+    """Compute spike, voltage, and sparsity losses over valid continuous bins."""
+    valid_spike_bins = loss_mask > 0.5
+    if torch.any(valid_spike_bins):
+        sp = spike_probs[valid_spike_bins]
+        ps = post_spikes[valid_spike_bins]
+        weight_mask = torch.where(ps == 1, pos_weight, 1.0)
+        spike_loss = F.binary_cross_entropy(
+            sp.clamp(1e-7, 1 - 1e-7), ps, weight=weight_mask,
+        )
+    else:
+        spike_loss = spike_probs.sum() * 0.0
+
+    valid_voltage_bins = (target_voltage_mask > 0.5) & valid_spike_bins
+    if torch.any(valid_voltage_bins):
+        voltage_loss = F.smooth_l1_loss(
+            predicted_voltage[valid_voltage_bins],
+            target_voltage[valid_voltage_bins],
+        )
+        n_voltage_points = int(valid_voltage_bins.sum().item())
+    else:
+        voltage_loss = predicted_voltage.sum() * 0.0
+        n_voltage_points = 0
+
+    l1_loss = l1_lambda * weights.abs().mean()
+    total = spike_loss + voltage_lambda * voltage_loss + l1_loss
+    n_spike_points = int(valid_spike_bins.sum().item())
+    return total, spike_loss.item(), voltage_loss.item(), l1_loss.item(), n_voltage_points, n_spike_points
+
+
+def run_continuous_state_epoch(model, spike_matrix, voltage_matrix, voltage_mask,
+                               neighbor_indices, neuron_ids, boundaries,
+                               excluded_bins, device, warmup, chunk_len,
+                               pos_weight, l1_lambda, voltage_lambda,
+                               optimizer=None):
+    """Run one ordered continuous-state pass over recording chunks."""
+    training = optimizer is not None
+    model.train(training)
+    total_loss = 0.0
+    total_spike = 0.0
+    total_voltage = 0.0
+    total_l1 = 0.0
+    total_voltage_points = 0
+    total_spike_points = 0
+    n_chunks = 0
+    total_bins = spike_matrix.shape[1]
+    loss_mask = build_continuous_loss_mask(
+        total_bins, boundaries, excluded_bins=excluded_bins, warmup=warmup,
+    )
+
+    for rec_start, rec_end in iter_continuous_segments(boundaries):
+        state = None
+        for chunk_start in range(rec_start, rec_end, int(chunk_len)):
+            chunk_end = min(chunk_start + int(chunk_len), rec_end)
+            tensors = make_continuous_chunk_tensors(
+                spike_matrix, voltage_matrix, voltage_mask, loss_mask,
+                neighbor_indices, neuron_ids, chunk_start, chunk_end, device,
+            )
+            pre_sp, post_sp, post_v, post_vm, chunk_loss_mask, neuron_ids_tensor = tensors
+
+            if training:
+                optimizer.zero_grad()
+            with torch.set_grad_enabled(training):
+                spike_probs, voltages, weights, state = model(
+                    pre_sp, post_sp, neuron_ids_tensor,
+                    tbptt_len=chunk_end - chunk_start,
+                    initial_state=state,
+                    return_state=True,
+                )
+                loss, sl, vl, l1l, n_voltage_points, n_spike_points = (
+                    compute_voltage_augmented_continuous_loss(
+                        spike_probs, voltages, post_sp, post_v, post_vm,
+                        chunk_loss_mask, weights,
+                        pos_weight=pos_weight,
+                        l1_lambda=l1_lambda,
+                        voltage_lambda=voltage_lambda,
+                    )
+                )
+                if training and n_spike_points > 0:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+
+            state = {key: value.detach() for key, value in state.items()}
+            if n_spike_points <= 0:
+                continue
+            total_loss += loss.item()
+            total_spike += sl
+            total_voltage += vl
+            total_l1 += l1l
+            total_voltage_points += n_voltage_points
+            total_spike_points += n_spike_points
+            n_chunks += 1
+
+    return {
+        'loss': total_loss / max(n_chunks, 1),
+        'spike_loss': total_spike / max(n_chunks, 1),
+        'voltage_loss': total_voltage / max(n_chunks, 1),
+        'l1_loss': total_l1 / max(n_chunks, 1),
+        'n_batches': n_chunks,
+        'n_windows': n_chunks,
+        'n_voltage_points': total_voltage_points,
+        'n_spike_points': total_spike_points,
+    }
+
+
+def train_continuous_state_model_with_early_stopping(
+        model, spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
+        true_binary, true_weights, train_boundaries, val_boundaries, excluded_bins,
+        device, warmup, chunk_len, pos_weight, l1_lambda, voltage_lambda,
+        n_epochs, patience, optimizer, scheduler=None, log_every=5, log_fn=print):
+    """Train the voltage model by carrying state across ordered recording chunks."""
+    best_val_loss = float('inf')
+    best_state = None
+    best_epoch = -1
+    epochs_no_improve = 0
+    train_history = []
+    val_history = []
+    conn_aucs = []
+    start_time = time.time()
+    max_patience = None if patience is None else max(int(patience), 1)
+    log_interval = max(int(log_every), 1)
+    neuron_ids = np.arange(model.n_neurons, dtype=np.int64)
+
+    for epoch in range(int(n_epochs)):
+        train_stats = run_continuous_state_epoch(
+            model, spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
+            neuron_ids, train_boundaries, excluded_bins, device, warmup, chunk_len,
+            pos_weight, l1_lambda, voltage_lambda, optimizer=optimizer,
+        )
+        train_history.append(train_stats)
+
+        val_stats = run_continuous_state_epoch(
+            model, spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
+            neuron_ids, val_boundaries, excluded_bins, device, warmup, chunk_len,
+            pos_weight, l1_lambda, voltage_lambda, optimizer=None,
+        )
+        val_history.append(val_stats)
+
+        conn_results, _, _, _, _, _ = evaluate_connectivity(
+            model, neighbor_indices, true_binary, true_weights,
+        )
+        conn_aucs.append(conn_results['auc'])
+
+        if scheduler is not None:
+            scheduler.step(val_stats['loss'])
+
+        if val_stats['loss'] < best_val_loss:
+            best_val_loss = val_stats['loss']
+            best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            best_epoch = epoch + 1
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        elapsed = time.time() - start_time
+        if log_fn is not None and (((epoch + 1) % log_interval == 0) or epoch == 0):
+            alpha = torch.sigmoid(model.alpha_logit).item()
+            log_fn(
+                f'    Epoch {epoch + 1:3d}: '
+                f'train={train_stats["loss"]:.4f} '
+                f'(spike={train_stats["spike_loss"]:.4f} voltage={train_stats["voltage_loss"]:.4f} l1={train_stats["l1_loss"]:.4f}) '
+                f'val={val_stats["loss"]:.4f} conn_AUC={conn_results["auc"]:.4f} '
+                f'alpha={alpha:.3f} theta_mode={model.threshold_mode} slow={model.slow_state_mode} ({elapsed:.0f}s)'
+            )
+
+        if max_patience is not None and epochs_no_improve >= max_patience:
+            if log_fn is not None:
+                log_fn(f'    Early stopping at epoch {epoch + 1}')
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    elapsed_seconds = time.time() - start_time
+    if log_fn is not None:
+        log_fn(f'  Done in {elapsed_seconds:.0f}s, best val loss={best_val_loss:.4f}')
+
+    val_window_results = run_continuous_state_epoch(
+        model, spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
+        neuron_ids, val_boundaries, excluded_bins, device, warmup, chunk_len,
+        pos_weight, l1_lambda, voltage_lambda, optimizer=None,
+    )
+    return {
+        'best_epoch': best_epoch,
+        'best_val_loss': best_val_loss,
+        'train_history': train_history,
+        'val_history': val_history,
+        'conn_aucs': conn_aucs,
+        'val_window_results': val_window_results,
+        'elapsed_seconds': elapsed_seconds,
+    }
+
+
+def estimate_continuous_surrogate_connectivity_score_sets(
+        spike_matrix, voltage_matrix, voltage_mask, neighbor_indices, n_neurons,
+        K_actual, max_delay, threshold_mode, slow_state_mode, lr, warmup,
+        chunk_len, pos_weight, l1_lambda, voltage_lambda, boundaries=None,
+        excluded_bins=None, val_fraction=0.2, device='cpu', n_surrogates=4,
+        surrogate_epochs=2, surrogate_patience=1,
+        surrogate_min_shift_fraction=0.10, surrogate_seed=1234):
+    """Fit circular-shift null models with the continuous-state training path."""
+    from .shared_data import build_segmentwise_circular_shift_surrogates
+
+    rng = np.random.default_rng(surrogate_seed)
+    score_sets = []
+    train_boundaries, val_boundaries = build_continuous_train_val_boundaries(
+        boundaries, spike_matrix.shape[1], val_fraction=val_fraction,
+    )
+    all_neuron_ids = np.arange(n_neurons, dtype=np.int64)
+    dummy_true_binary = np.zeros((n_neurons, n_neurons), dtype=np.int32)
+    dummy_true_weights = np.zeros((n_neurons, n_neurons), dtype=np.float32)
+
+    for surrogate_idx in range(int(n_surrogates)):
+        surrogate_spike_matrix, surrogate_voltage_matrix, surrogate_voltage_mask = (
+            build_segmentwise_circular_shift_surrogates(
+                [spike_matrix, voltage_matrix, voltage_mask],
+                boundaries=boundaries,
+                rng=rng,
+                min_shift_fraction=surrogate_min_shift_fraction,
+            )
+        )
+        torch.manual_seed(surrogate_seed + surrogate_idx)
+        surrogate_model = VoltageAugmentedPerNeuronLIF(
+            n_neurons=n_neurons,
+            K=K_actual,
+            max_delay=max_delay,
+            threshold_mode=threshold_mode,
+            slow_state_mode=slow_state_mode,
+        ).to(device)
+        optimizer = torch.optim.Adam(surrogate_model.parameters(), lr=lr, weight_decay=1e-5)
+        train_continuous_state_model_with_early_stopping(
+            surrogate_model, surrogate_spike_matrix, surrogate_voltage_matrix,
+            surrogate_voltage_mask, neighbor_indices, dummy_true_binary,
+            dummy_true_weights, train_boundaries, val_boundaries, excluded_bins,
+            device, warmup, chunk_len, pos_weight, l1_lambda, voltage_lambda,
+            surrogate_epochs, surrogate_patience, optimizer, scheduler=None,
+            log_every=max(int(surrogate_epochs), 1), log_fn=None,
+        )
+        surrogate_conn_matrix = surrogate_model.get_connectivity_matrix(neighbor_indices)
+        score_sets.append(np.concatenate([
+            np.abs(surrogate_conn_matrix[neuron_id, neighbor_indices[neuron_id]])
+            for neuron_id in all_neuron_ids
+        ]).astype(np.float32, copy=False))
+
+    return np.stack(score_sets, axis=0)
+
+
 def estimate_surrogate_connectivity_score_sets(
         spike_matrix, voltage_matrix, voltage_mask,
         neighbor_indices, n_neurons, K_actual, max_delay,
@@ -998,7 +1433,7 @@ def estimate_surrogate_connectivity_score_sets(
         boundaries=None, excluded_bins=None, val_fraction=0.2,
         device='cpu', n_surrogates=4, surrogate_epochs=2,
         surrogate_patience=1, surrogate_min_shift_fraction=0.10,
-        surrogate_seed=1234):
+        surrogate_seed=1234, slow_state_mode='none'):
     return shared_estimate_surrogate_connectivity_score_sets(
         VoltageAugmentedPerNeuronLIF,
         build_train_val_voltage_datasets,
@@ -1031,6 +1466,7 @@ def estimate_surrogate_connectivity_score_sets(
         surrogate_patience=surrogate_patience,
         surrogate_min_shift_fraction=surrogate_min_shift_fraction,
         surrogate_seed=surrogate_seed,
+        model_kwargs={'slow_state_mode': slow_state_mode},
     )
 
 
@@ -1069,6 +1505,7 @@ def evaluate_connectivity(model, neighbor_indices, true_binary, true_weights,
     all_abs_scores = []
     all_labels = []
     all_true_weights = []
+    all_score_neuron_ids = []
 
     for j in neuron_ids:
         pre_ids = neighbor_indices[j]
@@ -1077,11 +1514,13 @@ def evaluate_connectivity(model, neighbor_indices, true_binary, true_weights,
         all_abs_scores.append(np.abs(signed_scores))
         all_labels.append(true_binary[j, pre_ids].astype(np.float32))
         all_true_weights.append(true_weights[j, pre_ids].astype(np.float32))
+        all_score_neuron_ids.append(np.full(len(pre_ids), int(j), dtype=np.int32))
 
     signed_scores = np.concatenate(all_signed_scores)
     abs_scores = np.concatenate(all_abs_scores)
     labels = np.concatenate(all_labels)
     flat_true_weights = np.concatenate(all_true_weights)
+    score_neuron_ids = np.concatenate(all_score_neuron_ids)
 
     results = {}
     if len(np.unique(labels)) > 1:
@@ -1095,9 +1534,13 @@ def evaluate_connectivity(model, neighbor_indices, true_binary, true_weights,
             surrogate_score_sets=surrogate_score_sets,
             surrogate_fdr=surrogate_fdr,
             default_threshold=0.5,
+            score_neuron_ids=score_neuron_ids,
         )
         predicted = np.zeros_like(labels, dtype=np.int32)
-        if np.isfinite(threshold_info['threshold']):
+        per_score_thresholds = threshold_info.get('per_score_thresholds')
+        if per_score_thresholds is not None:
+            predicted = (abs_scores >= np.asarray(per_score_thresholds, dtype=np.float64)).astype(np.int32)
+        elif np.isfinite(threshold_info['threshold']):
             predicted = (abs_scores >= threshold_info['threshold']).astype(np.int32)
 
         results.update(threshold_info)
@@ -1317,6 +1760,16 @@ def plot_results(connectivity_results, abs_scores, labels, signed_scores,
     ax.set_title('Weight Score Distribution')
     ax.legend(fontsize=8)
 
+    per_neuron_threshold_map = None
+    if 'per_neuron_thresholds' in connectivity_results:
+        per_neuron_threshold_map = {
+            int(neuron_id): float(threshold)
+            for neuron_id, threshold in zip(
+                connectivity_results.get('per_neuron_ids', []),
+                connectivity_results.get('per_neuron_thresholds', []),
+            )
+        }
+
     ax = axes[0, 2]
     if connectivity_results['auc'] > 0:
         prec, rec, _ = precision_recall_curve(labels, abs_scores)
@@ -1360,9 +1813,12 @@ def plot_results(connectivity_results, abs_scores, labels, signed_scores,
     predicted_edges = []
     for j in range(n_neurons):
         pre_ids = neighbor_indices[j]
+        row_thresh = thresh
+        if per_neuron_threshold_map is not None:
+            row_thresh = per_neuron_threshold_map.get(int(j), float('inf'))
         for pre in pre_ids:
             weight = float(conn_matrix[j, pre])
-            if abs(weight) >= thresh:
+            if abs(weight) >= row_thresh:
                 predicted_edges.append((pre, j, weight))
     if predicted_edges:
         pred_abs_weights = np.array([abs(weight) for _, _, weight in predicted_edges], dtype=np.float32)
@@ -1389,6 +1845,16 @@ def plot_results(connectivity_results, abs_scores, labels, signed_scores,
     alpha_val = torch.sigmoid(model.alpha_logit).item()
     tau_eff = -1.0 / np.log(alpha_val + 1e-10)
     bias_abs = float(model.bias.abs().mean().item())
+    slow_summary = ''
+    if model.slow_state_mode != 'none':
+        slow_summary = f"""
+Intrinsic slow states:
+    mode:      {model.slow_state_mode}
+    adapt eta: {model.slow_adaptation_gain.mean().item():.4f}
+    adapt rho: {model.slow_adaptation_decay.item():.4f}
+    h gain:    {model.h_current_gain.mean().item():.4f}
+    h decay:   {model.h_decay.item():.4f}
+"""
     summary = f"""
 VOLTAGE-AUGMENTED LEARNED LIF
 ========================================
@@ -1405,6 +1871,7 @@ Learned Membrane Parameters:
   beta:      {model.beta.item():.4f}
   reset:     {F.softplus(model.reset_strength).item():.4f}
   mean |bias|: {bias_abs:.4f}
+{slow_summary}
 
 Held-out window validation:
   Loss:        {val_window_results.get('loss', 0):.4f}
@@ -1521,12 +1988,14 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  max_delay=8, l1_lambda=0.01, pos_weight=5.0,
                  voltage_lambda=1.0, subsample_T=None, device=None,
                  output_tag=None, pre_context=50, post_context=10,
-                 warmup=30, neg_ratio=1.0, neg_min_distance=100,
+                 warmup=100, neg_ratio=1.0, neg_min_distance=100,
+                 training_mode='event_window', continuous_chunk_len=250,
                  use_all_recordings=True, candidate_mode='hybrid',
                  candidate_spatial_frac=0.8, candidate_min_lag=1,
-                 candidate_max_lag=None, mask_pre_ms=1.0,
+                 candidate_max_lag=None, mask_pre_ms=0.0,
                  mask_post_ms=2.0, peak_threshold_mv=15.0,
                  threshold_mode='adaptive',
+                 slow_state_mode='none',
                  connectivity_threshold_mode='oracle_f1',
                  surrogate_fdr=0.005,
                  n_threshold_surrogates=4,
@@ -1568,6 +2037,9 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         warmup: Number of warmup bins excluded from the event loss.
         neg_ratio: Number of negative windows sampled per positive window.
         neg_min_distance: Minimum distance in bins between negative windows and real spikes.
+        training_mode: ``event_window`` for legacy shuffled windows or
+            ``continuous_state`` to carry states through ordered recording chunks.
+        continuous_chunk_len: Chunk length in bins for truncated BPTT in continuous mode.
         use_all_recordings: Whether to concatenate all session recordings before fitting.
         candidate_mode: Candidate proposal mode, typically spatial or hybrid.
         candidate_spatial_frac: Spatial fraction reserved in hybrid candidate mode.
@@ -1577,8 +2049,10 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         mask_post_ms: Time masked after each spike in the voltage target.
         peak_threshold_mv: Optional voltage threshold used to drop legacy visualization peaks.
         threshold_mode: Threshold parameterization, either ``adaptive`` or ``shared``.
+        slow_state_mode: Optional intrinsic slow-state model, one of ``none``,
+            ``adaptation``, ``h``, or ``adaptation_h``.
         connectivity_threshold_mode: Edge-call thresholding rule, either
-            ``oracle_f1`` or ``surrogate_fdr``.
+            ``oracle_f1``, ``surrogate_fdr``, or ``surrogate_fdr_per_neuron``.
         surrogate_fdr: Target false discovery rate used in surrogate threshold mode.
         n_threshold_surrogates: Number of circular-shift surrogate models used for null calibration.
         surrogate_epochs: Maximum epochs used to fit each surrogate null model.
@@ -1601,6 +2075,12 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     """
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    training_mode = str(training_mode).strip().lower()
+    if training_mode not in {'event_window', 'continuous_state'}:
+        raise ValueError(
+            f"Unsupported training_mode={training_mode!r}; use 'event_window' or 'continuous_state'"
+        )
+    continuous_chunk_len = max(int(continuous_chunk_len), 1)
 
     dt, dt_source = resolve_session_dt(session_dir, dt)
 
@@ -1614,9 +2094,11 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         print(f'Output tag: {output_tag}')
     print(f'K={K}, epochs={n_epochs}, lr={lr}, max_delay={max_delay}, l1={l1_lambda}, voltage_lambda={voltage_lambda}')
     print(f'Window: warmup={warmup}, pre={pre_context}, post={post_context} ({warmup + pre_context + post_context} bins)')
+    print(f'Training mode: {training_mode}, continuous_chunk_len={continuous_chunk_len}')
     print(f'Voltage cleaning: mask_pre={mask_pre_ms}ms, mask_post={mask_post_ms}ms, peak<{peak_threshold_mv}mV')
     print(f'Dt: {dt:g} ms ({dt_source})')
     print(f'Threshold mode: {threshold_mode}')
+    print(f'Slow state mode: {slow_state_mode}')
     print(f'Connectivity thresholding: {connectivity_threshold_mode}')
     print(f'Device: {device}')
     print(f"{'='*70}")
@@ -1672,14 +2154,14 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
             spike_matrix,
             boundaries,
             dt_ms=dt,
-            activity_bin_ms=burst_activity_bin_ms,
+            activity_bin_ms=int(round(burst_activity_bin_ms)),
             smooth_bins=burst_smooth_bins,
             threshold_std=burst_threshold_std,
             min_active_fraction=burst_min_active_fraction,
-            min_burst_duration_ms=burst_min_duration_ms,
-            merge_gap_ms=burst_merge_gap_ms,
-            pad_before_ms=burst_pad_before_ms,
-            pad_after_ms=burst_pad_after_ms,
+            min_burst_duration_ms=int(round(burst_min_duration_ms)),
+            merge_gap_ms=int(round(burst_merge_gap_ms)),
+            pad_before_ms=int(round(burst_pad_before_ms)),
+            pad_after_ms=int(round(burst_pad_after_ms)),
         )
 
     excluded_bins = combine_excluded_bins(
@@ -1732,40 +2214,78 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         print(f'  Mean temporal-only candidates per neuron: {candidate_info["mean_temporal_only"]:.1f}')
     print(f'  K={K_actual}, coverage: {total_in_K}/{total_true} ({total_in_K / max(total_true, 1):.1%})')
 
-    print('\n  Extracting event windows...')
     all_neuron_ids = np.arange(n_neurons)
-    train_ds, val_ds, validation_strategy = build_train_val_voltage_datasets(
-        spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
-        all_neuron_ids,
-        pre_context=pre_context,
-        post_context=post_context,
-        warmup=warmup,
-        neg_ratio=neg_ratio,
-        neg_min_distance=neg_min_distance,
-        boundaries=boundaries,
-        excluded_bins=excluded_bins,
-        val_fraction=val_fraction,
-        rng_seed=42,
-    )
-    print(f'  Validation strategy: {validation_strategy}')
-    print(f'  Train windows: {len(train_ds)} ({train_ds.n_pos} pos, {train_ds.n_neg} neg)')
-    print(f'  Val windows:   {len(val_ds)} ({val_ds.n_pos} pos, {val_ds.n_neg} neg)')
+    train_ds = None
+    val_ds = None
+    train_loader = None
+    val_loader = None
+    continuous_train_boundaries = None
+    continuous_val_boundaries = None
 
-    if len(train_ds) == 0:
-        raise RuntimeError('No training windows extracted. Check spike activity and window settings.')
+    if training_mode == 'event_window':
+        print('\n  Extracting event windows...')
+        train_ds, val_ds, validation_strategy = build_train_val_voltage_datasets(
+            spike_matrix, voltage_matrix, voltage_mask, neighbor_indices,
+            all_neuron_ids,
+            pre_context=pre_context,
+            post_context=post_context,
+            warmup=warmup,
+            neg_ratio=neg_ratio,
+            neg_min_distance=neg_min_distance,
+            boundaries=boundaries,
+            excluded_bins=excluded_bins,
+            val_fraction=val_fraction,
+            rng_seed=42,
+        )
+        print(f'  Validation strategy: {validation_strategy}')
+        print(f'  Train windows: {len(train_ds)} ({train_ds.n_pos} pos, {train_ds.n_neg} neg)')
+        print(f'  Val windows:   {len(val_ds)} ({val_ds.n_pos} pos, {val_ds.n_neg} neg)')
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+        if len(train_ds) == 0:
+            raise RuntimeError('No training windows extracted. Check spike activity and window settings.')
+
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    else:
+        print('\n  Preparing continuous-state chunks...')
+        continuous_train_boundaries, continuous_val_boundaries = build_continuous_train_val_boundaries(
+            boundaries, T, val_fraction=val_fraction,
+        )
+        if continuous_val_boundaries is None:
+            raise RuntimeError('Continuous-state training requires a validation segment')
+        validation_strategy = (
+            f'continuous state held-out recordings/chunks '
+            f'({len(continuous_train_boundaries) - 1} train, {len(continuous_val_boundaries) - 1} val)'
+        )
+        if len(excluded_bins) > 0:
+            validation_strategy += f', excluding {len(excluded_bins)} bins'
+        train_chunks = sum(
+            int(np.ceil((end - start) / continuous_chunk_len))
+            for start, end in iter_continuous_segments(continuous_train_boundaries)
+        )
+        val_chunks = sum(
+            int(np.ceil((end - start) / continuous_chunk_len))
+            for start, end in iter_continuous_segments(continuous_val_boundaries)
+        )
+        print(f'  Validation strategy: {validation_strategy}')
+        print(f'  Train chunks: {train_chunks} x all-neuron batches')
+        print(f'  Val chunks:   {val_chunks} x all-neuron batches')
 
     model = VoltageAugmentedPerNeuronLIF(
         n_neurons=n_neurons,
         K=K_actual,
         max_delay=max_delay,
         threshold_mode=threshold_mode,
+        slow_state_mode=slow_state_mode,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     membrane_threshold_params = 2 * n_neurons + 4 if model.threshold_mode == 'adaptive' else 4
-    print(f'  Parameters: {n_params:,} (W: {n_neurons * K_actual:,}, delays: {n_neurons * K_actual * max_delay:,}, bias: {n_neurons:,}, membrane+threshold: {membrane_threshold_params:,})')
+    slow_params = 0
+    if model.uses_slow_adaptation:
+        slow_params += n_neurons + 1
+    if model.uses_h_current:
+        slow_params += n_neurons + 3
+    print(f'  Parameters: {n_params:,} (W: {n_neurons * K_actual:,}, delays: {n_neurons * K_actual * max_delay:,}, bias: {n_neurons:,}, membrane+threshold: {membrane_threshold_params:,}, slow-state: {slow_params:,})')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1773,28 +2293,54 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     )
 
     # Early stopping tracks the combined spike+voltage objective rather than connectivity AUC alone.
-    print('\n  Training with event windows...')
-    training_results = train_voltage_model_with_early_stopping(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        scheduler,
-        train_epoch_events,
-        evaluate_event_windows,
-        evaluate_connectivity,
-        neighbor_indices,
-        true_binary,
-        true_weights,
-        device,
-        warmup,
-        pos_weight,
-        l1_lambda,
-        voltage_lambda,
-        n_epochs,
-        patience,
-        log_every=5,
-    )
+    if training_mode == 'event_window':
+        print('\n  Training with event windows...')
+        training_results = train_voltage_model_with_early_stopping(
+            model,
+            train_loader,
+            val_loader,
+            optimizer,
+            scheduler,
+            train_epoch_events,
+            evaluate_event_windows,
+            evaluate_connectivity,
+            neighbor_indices,
+            true_binary,
+            true_weights,
+            device,
+            warmup,
+            pos_weight,
+            l1_lambda,
+            voltage_lambda,
+            n_epochs,
+            patience,
+            log_every=5,
+        )
+    else:
+        print('\n  Training with continuous state...')
+        training_results = train_continuous_state_model_with_early_stopping(
+            model,
+            spike_matrix,
+            voltage_matrix,
+            voltage_mask,
+            neighbor_indices,
+            true_binary,
+            true_weights,
+            continuous_train_boundaries,
+            continuous_val_boundaries,
+            excluded_bins,
+            device,
+            warmup,
+            continuous_chunk_len,
+            pos_weight,
+            l1_lambda,
+            voltage_lambda,
+            n_epochs,
+            patience,
+            optimizer,
+            scheduler=scheduler,
+            log_every=5,
+        )
     train_history = training_results['train_history']
     val_history = training_results['val_history']
     conn_aucs = training_results['conn_aucs']
@@ -1802,41 +2348,70 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     val_window_results = training_results['val_window_results']
 
     surrogate_score_sets = None
-    if connectivity_threshold_mode == 'surrogate_fdr':
+    if connectivity_threshold_mode in {'surrogate_fdr', 'surrogate_fdr_per_neuron'}:
         print(
             f'\n  Calibrating non-leaky connectivity threshold with '
             f'{n_threshold_surrogates} circular-shift surrogates '
             f'(target FDR={surrogate_fdr:.3f})...'
         )
-        surrogate_score_sets = estimate_surrogate_connectivity_score_sets(
-            spike_matrix,
-            voltage_matrix,
-            voltage_mask,
-            neighbor_indices,
-            n_neurons=n_neurons,
-            K_actual=K_actual,
-            max_delay=max_delay,
-            threshold_mode=threshold_mode,
-            lr=lr,
-            batch_size=batch_size,
-            warmup=warmup,
-            pos_weight=pos_weight,
-            l1_lambda=l1_lambda,
-            voltage_lambda=voltage_lambda,
-            pre_context=pre_context,
-            post_context=post_context,
-            neg_ratio=neg_ratio,
-            neg_min_distance=neg_min_distance,
-            boundaries=boundaries,
-            excluded_bins=excluded_bins,
-            val_fraction=val_fraction,
-            device=device,
-            n_surrogates=n_threshold_surrogates,
-            surrogate_epochs=surrogate_epochs,
-            surrogate_patience=surrogate_patience,
-            surrogate_min_shift_fraction=surrogate_min_shift_fraction,
-            surrogate_seed=surrogate_seed,
-        )
+        if training_mode == 'continuous_state':
+            surrogate_score_sets = estimate_continuous_surrogate_connectivity_score_sets(
+                spike_matrix,
+                voltage_matrix,
+                voltage_mask,
+                neighbor_indices,
+                n_neurons=n_neurons,
+                K_actual=K_actual,
+                max_delay=max_delay,
+                threshold_mode=threshold_mode,
+                slow_state_mode=slow_state_mode,
+                lr=lr,
+                warmup=warmup,
+                chunk_len=continuous_chunk_len,
+                pos_weight=pos_weight,
+                l1_lambda=l1_lambda,
+                voltage_lambda=voltage_lambda,
+                boundaries=boundaries,
+                excluded_bins=excluded_bins,
+                val_fraction=val_fraction,
+                device=device,
+                n_surrogates=n_threshold_surrogates,
+                surrogate_epochs=surrogate_epochs,
+                surrogate_patience=surrogate_patience,
+                surrogate_min_shift_fraction=surrogate_min_shift_fraction,
+                surrogate_seed=surrogate_seed,
+            )
+        else:
+            surrogate_score_sets = estimate_surrogate_connectivity_score_sets(
+                spike_matrix,
+                voltage_matrix,
+                voltage_mask,
+                neighbor_indices,
+                n_neurons=n_neurons,
+                K_actual=K_actual,
+                max_delay=max_delay,
+                threshold_mode=threshold_mode,
+                lr=lr,
+                batch_size=batch_size,
+                warmup=warmup,
+                pos_weight=pos_weight,
+                l1_lambda=l1_lambda,
+                voltage_lambda=voltage_lambda,
+                pre_context=pre_context,
+                post_context=post_context,
+                neg_ratio=neg_ratio,
+                neg_min_distance=neg_min_distance,
+                boundaries=boundaries,
+                excluded_bins=excluded_bins,
+                val_fraction=val_fraction,
+                device=device,
+                n_surrogates=n_threshold_surrogates,
+                surrogate_epochs=surrogate_epochs,
+                surrogate_patience=surrogate_patience,
+                surrogate_min_shift_fraction=surrogate_min_shift_fraction,
+                surrogate_seed=surrogate_seed,
+                slow_state_mode=slow_state_mode,
+            )
         print(
             f'  Surrogate score sets: {surrogate_score_sets.shape[0]} models x '
             f'{surrogate_score_sets.shape[1]} edges'
@@ -1902,8 +2477,10 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         'session_name': session_name,
         'output_name': output_name,
         'validation_strategy': validation_strategy,
+        'training_mode': training_mode,
         'candidate_info': candidate_info,
         'threshold_mode': model.threshold_mode,
+        'slow_state_mode': model.slow_state_mode,
         'connectivity_threshold_mode': connectivity_threshold_mode,
         'neighbor_indices': neighbor_indices,
         'connectivity_matrix': conn_matrix,
@@ -1913,6 +2490,22 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         'val_history': val_history,
         'connectivity_aucs': conn_aucs,
         'recording_summaries': data['recording_summaries'],
+        'window_config': {
+            'pre_context': int(pre_context),
+            'post_context': int(post_context),
+            'warmup': int(warmup),
+            'neg_ratio': float(neg_ratio),
+            'neg_min_distance': int(neg_min_distance),
+            'val_fraction': float(val_fraction),
+            'training_mode': training_mode,
+            'continuous_chunk_len': int(continuous_chunk_len),
+            'rng_seed': 42,
+        },
+        'data_config': {
+            'use_all_recordings': bool(use_all_recordings),
+            'recording_idx': int(recording_idx),
+            'subsample_T': None if subsample_T is None else int(subsample_T),
+        },
         'saved_burst_onset_bins': saved_burst_onset_bins,
         'detected_burst_windows': detected_burst_info['windows'],
         'excluded_bins': excluded_bins,
@@ -1927,6 +2520,10 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
             'estimated_fdr': all_results.get('estimated_fdr'),
             'expected_null_selected': all_results.get('expected_null_selected'),
             'selected_edges': all_results.get('selected_edges'),
+            'per_neuron_ids': all_results.get('per_neuron_ids'),
+            'per_neuron_thresholds': all_results.get('per_neuron_thresholds'),
+            'per_neuron_selected_edges': all_results.get('per_neuron_selected_edges'),
+            'per_neuron_estimated_fdr': all_results.get('per_neuron_estimated_fdr'),
         },
         'adaptive_threshold': {
             'threshold_mode': model.threshold_mode,
@@ -1934,6 +2531,15 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
             'threshold_base_std': float(model.threshold_base_values.std(unbiased=False).item()),
             'threshold_increment_mean': float(model.threshold_increment.mean().item()),
             'threshold_decay': float(model.threshold_decay.item()),
+        },
+        'slow_states': {
+            'slow_state_mode': model.slow_state_mode,
+            'slow_adaptation_gain_mean': float(model.slow_adaptation_gain.mean().item()),
+            'slow_adaptation_decay': float(model.slow_adaptation_decay.item()),
+            'h_current_gain_mean': float(model.h_current_gain.mean().item()),
+            'h_decay': float(model.h_decay.item()),
+            'h_activation_midpoint': None if model.h_activation_midpoint is None else float(model.h_activation_midpoint.item()),
+            'h_activation_slope': float(model.h_activation_slope.item()),
         },
         'voltage_cleaning': {
             'mask_pre_ms': mask_pre_ms,
@@ -1945,15 +2551,36 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     print(f'  Model + connectivity saved: {model_path}')
 
     conn_path = os.path.join(output_dir, f'connectivity_{output_name}.npz')
+    estimated_fdr_value = all_results.get('estimated_fdr')
+    estimated_fdr_value = np.nan if estimated_fdr_value is None else float(estimated_fdr_value)
+    per_neuron_ids = all_results.get('per_neuron_ids')
+    per_neuron_thresholds = all_results.get('per_neuron_thresholds')
+    per_neuron_selected_edges = all_results.get('per_neuron_selected_edges')
+    per_neuron_estimated_fdr = all_results.get('per_neuron_estimated_fdr')
+    if per_neuron_ids is None:
+        per_neuron_ids = np.array([], dtype=np.int32)
+    if per_neuron_thresholds is None:
+        per_neuron_thresholds = np.array([], dtype=np.float32)
+    if per_neuron_selected_edges is None:
+        per_neuron_selected_edges = np.array([], dtype=np.int32)
+    if per_neuron_estimated_fdr is None:
+        per_neuron_estimated_fdr = np.array([], dtype=np.float32)
     np.savez_compressed(
         conn_path,
         connectivity_matrix=conn_matrix,
         threshold=all_results.get('threshold', 0.5),
         connectivity_threshold_mode=connectivity_threshold_mode,
-        estimated_fdr=all_results.get('estimated_fdr'),
+        estimated_fdr=estimated_fdr_value,
+        training_mode=training_mode,
+        continuous_chunk_len=int(continuous_chunk_len),
         neighbor_indices=neighbor_indices,
         neuron_positions=positions,
         true_weights=true_weights,
+        slow_state_mode=model.slow_state_mode,
+        per_neuron_ids=per_neuron_ids,
+        per_neuron_thresholds=per_neuron_thresholds,
+        per_neuron_selected_edges=per_neuron_selected_edges,
+        per_neuron_estimated_fdr=per_neuron_estimated_fdr,
         saved_burst_onset_bins=saved_burst_onset_bins,
         detected_burst_windows=detected_burst_info['windows'],
         excluded_bins=excluded_bins,
@@ -2026,9 +2653,12 @@ def build_parser():
     parser.add_argument('--threshold-mode', type=str, default='adaptive',
                         choices=['adaptive', 'shared'],
                         help='Use per-neuron adaptive thresholds or one shared threshold for all neurons')
+    parser.add_argument('--slow-state-mode', type=str, default='none',
+                        choices=['none', 'adaptation', 'h', 'adaptation_h'],
+                        help='Optional intrinsic slow-state terms in the inference LIF: spike-triggered adaptation, reduced h-like current, or both')
     parser.add_argument('--connectivity-threshold-mode', type=str, default='oracle_f1',
-                        choices=['oracle_f1', 'surrogate_fdr'],
-                        help='Choose the binary edge cutoff from ground-truth F1 or surrogate null calibration')
+                        choices=['oracle_f1', 'surrogate_fdr', 'surrogate_fdr_per_neuron'],
+                        help='Choose the binary edge cutoff from ground-truth F1, global surrogate null calibration, or per-postsynaptic-neuron surrogate calibration')
     parser.add_argument('--surrogate-fdr', type=float, default=0.005,
                         help='Target false discovery rate for surrogate thresholding')
     parser.add_argument('--n-threshold-surrogates', type=int, default=4,
@@ -2043,11 +2673,18 @@ def build_parser():
                         help='Base random seed used for surrogate threshold calibration')
     parser.add_argument('--pre-context', type=int, default=50)
     parser.add_argument('--post-context', type=int, default=10)
-    parser.add_argument('--warmup', type=int, default=30)
+    parser.add_argument('--warmup', type=int, default=100,
+                        help='Leading bins simulated per window but excluded from the loss, giving slow membrane/adaptation state time to settle before the scored region')
+    parser.add_argument('--training-mode', type=str, default='event_window',
+                        choices=['event_window', 'continuous_state'],
+                        help='Use legacy shuffled event windows or ordered chunks that carry membrane/adaptation/h state across each recording')
+    parser.add_argument('--continuous-chunk-len', type=int, default=250,
+                        help='Chunk length in bins for truncated BPTT when --training-mode continuous_state')
     parser.add_argument('--neg-ratio', type=float, default=1.0)
     parser.add_argument('--neg-min-dist', type=int, default=100)
     parser.add_argument('--val-fraction', type=float, default=0.2)
-    parser.add_argument('--mask-pre-ms', type=float, default=1.0)
+    parser.add_argument('--mask-pre-ms', type=float, default=0.0,
+                        help='Voltage masked before each spike; default 0.0 keeps the pre-spike depolarization ramp as a supervised timing target while the spike bin and post-spike reset stay masked')
     parser.add_argument('--mask-post-ms', type=float, default=2.0)
     parser.add_argument('--peak-threshold-mv', type=float, default=15.0)
     parser.add_argument('--exclude-detected-bursts', action='store_true',
@@ -2098,12 +2735,15 @@ def main(argv=None):
         pre_context=args.pre_context, post_context=args.post_context,
         warmup=args.warmup, neg_ratio=args.neg_ratio,
         neg_min_distance=args.neg_min_dist,
+        training_mode=args.training_mode,
+        continuous_chunk_len=args.continuous_chunk_len,
         use_all_recordings=not args.single_recording,
         candidate_mode=args.candidate_mode,
         candidate_spatial_frac=args.candidate_spatial_frac,
         candidate_min_lag=args.candidate_min_lag,
         candidate_max_lag=args.candidate_max_lag,
         threshold_mode=args.threshold_mode,
+        slow_state_mode=args.slow_state_mode,
         connectivity_threshold_mode=args.connectivity_threshold_mode,
         surrogate_fdr=args.surrogate_fdr,
         n_threshold_surrogates=args.n_threshold_surrogates,
