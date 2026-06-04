@@ -60,21 +60,29 @@ from .voltage_training_orchestration import (
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def resolve_session_dt(session_dir, cli_dt=None):
+def resolve_session_dt(session_dir, cli_dt=None, default_supervision_dt=1.0):
     """Resolve the spike/voltage bin width for one saved session.
 
     Args:
         session_dir: Session directory containing saved recordings and optional metadata.
         cli_dt: Optional user-provided override from ``--dt``.
+        default_supervision_dt: Training bin width used when ``cli_dt`` is not
+            given and the native saved rate is finer. Supervising the masked
+            subthreshold voltage at ~1 ms (rather than the native 0.1 ms) keeps
+            targets informative while avoiding redundant, highly autocorrelated
+            samples and the 10x compute cost. Masking still happens at the
+            native rate before mean-pooling, so no spike-onset contamination
+            leaks in. Pass ``--dt 0.1`` explicitly to train at native rate.
 
     Returns:
         A tuple ``(dt, source)`` where ``dt`` is the resolved bin width in
-        milliseconds and ``source`` records whether it came from the CLI,
-        session metadata, or the first recording file.
+        milliseconds and ``source`` records where it came from.
     """
     if cli_dt is not None:
         return float(cli_dt), 'cli'
 
+    native_dt = None
+    source = None
     metadata_path = os.path.join(session_dir, 'session_metadata.json')
     if os.path.exists(metadata_path):
         with open(metadata_path, 'r', encoding='utf-8') as handle:
@@ -82,18 +90,30 @@ def resolve_session_dt(session_dir, cli_dt=None):
         for key in ('voltage_sample_rate', 'dt'):
             value = metadata.get(key)
             if value is not None:
-                return float(value), f'session metadata ({key})'
+                native_dt = float(value)
+                source = f'session metadata ({key})'
+                break
 
-    rec_files = sorted(glob.glob(os.path.join(session_dir, 'recording[0-9][0-9][0-9].npz')))
-    if rec_files:
-        with np.load(rec_files[0], allow_pickle=True) as data:
-            if 'voltage_sample_rate' in data.files:
-                return float(data['voltage_sample_rate']), 'first recording voltage_sample_rate'
+    if native_dt is None:
+        rec_files = sorted(glob.glob(os.path.join(session_dir, 'recording[0-9][0-9][0-9].npz')))
+        if rec_files:
+            with np.load(rec_files[0], allow_pickle=True) as data:
+                if 'voltage_sample_rate' in data.files:
+                    native_dt = float(data['voltage_sample_rate'])
+                    source = 'first recording voltage_sample_rate'
 
-    raise ValueError(
-        'Could not infer dt for the voltage-augmented CLI. Pass --dt explicitly '
-        'or ensure session_metadata.json stores voltage_sample_rate or dt.'
-    )
+    if native_dt is None:
+        raise ValueError(
+            'Could not infer dt for the voltage-augmented CLI. Pass --dt explicitly '
+            'or ensure session_metadata.json stores voltage_sample_rate or dt.'
+        )
+
+    if native_dt + 1e-9 < float(default_supervision_dt):
+        return float(default_supervision_dt), (
+            f'{source} native={native_dt} ms -> default supervision dt '
+            f'{float(default_supervision_dt)} ms (mask at native rate, mean-pool)'
+        )
+    return native_dt, source
 
 
 def spike_times_to_sample_bins(spike_times, sample_rate_ms, n_samples):
@@ -1985,7 +2005,7 @@ def load_single_recording_with_voltage(session_dir, recording_idx=0, dt=1.0,
 
 def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  batch_size=128, patience=20, val_fraction=0.2, dt=None,
-                 max_delay=8, l1_lambda=0.01, pos_weight=5.0,
+                 max_delay=None, max_delay_ms=10.0, l1_lambda=0.01, pos_weight=5.0,
                  voltage_lambda=1.0, subsample_T=None, device=None,
                  output_tag=None, pre_context=50, post_context=10,
                  warmup=100, neg_ratio=1.0, neg_min_distance=100,
@@ -2083,6 +2103,16 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     continuous_chunk_len = max(int(continuous_chunk_len), 1)
 
     dt, dt_source = resolve_session_dt(session_dir, dt)
+
+    if max_delay is None:
+        max_delay = max(1, int(round(float(max_delay_ms) / float(dt))))
+        print(
+            f'max_delay derived: {max_delay_ms} ms / dt {dt} ms -> {max_delay} bins '
+            f'(covers the synaptic latency + conductance-rise smear; '
+            f'the EPSP/IPSP shape itself comes from the model membrane integration)'
+        )
+    else:
+        print(f'max_delay (explicit): {max_delay} bins = {max_delay * dt:.1f} ms at dt {dt} ms')
 
     session_name = os.path.basename(session_dir)
     output_tag = output_tag.strip().replace(' ', '_') if output_tag else None
@@ -2631,7 +2661,12 @@ def build_parser():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--batch', type=int, default=128)
     parser.add_argument('--patience', type=int, default=20)
-    parser.add_argument('--max-delay', type=int, default=8)
+    parser.add_argument('--max-delay', type=int, default=None,
+                        help='Synaptic-latency window in BINS (explicit override). '
+                             'If omitted, derived from --max-delay-ms and the resolved dt.')
+    parser.add_argument('--max-delay-ms', type=float, default=10.0,
+                        help='Synaptic-latency window in MILLISECONDS. Converted to bins '
+                             'via dt so it stays physically meaningful at any resolution.')
     parser.add_argument('--l1', type=float, default=0.01)
     parser.add_argument('--pos-weight', type=float, default=5.0)
     parser.add_argument('--voltage-lambda', type=float, default=1.0,
@@ -2728,6 +2763,7 @@ def main(argv=None):
         session_dir, K=args.k, recording_idx=args.recording,
         n_epochs=args.epochs, lr=args.lr, batch_size=args.batch,
         patience=args.patience, dt=args.dt, max_delay=args.max_delay,
+        max_delay_ms=args.max_delay_ms,
         l1_lambda=args.l1, pos_weight=args.pos_weight,
         voltage_lambda=args.voltage_lambda,
         val_fraction=args.val_fraction, output_tag=args.output_tag,
