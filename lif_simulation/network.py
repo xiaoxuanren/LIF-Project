@@ -273,7 +273,9 @@ def add_hub_connections(
     return hub_connections
 
 
-def assign_baseline_drive(neurons, mean=0.11, sd=0.05, seed=0, excitatory_only=True):
+def assign_baseline_drive(
+    neurons, mean=0.11, sd=0.05, seed=0, excitatory_only=True, distribution="gaussian"
+):
     """Assign frozen heterogeneous baseline current to neurons.
 
     Args:
@@ -281,16 +283,22 @@ def assign_baseline_drive(neurons, mean=0.11, sd=0.05, seed=0, excitatory_only=T
         mean: Mean baseline drive in nA-equivalent units. For the default
             excitatory parameters, this should stay below rheobase at about
             0.115 nA-equivalent.
-        sd: Standard deviation of the Gaussian baseline-drive distribution.
+        sd: Standard deviation of the baseline-drive distribution.
         seed: Seed for the one-time frozen-disorder draw.
         excitatory_only: Whether inhibitory neurons should receive zero baseline
             drive and be recruited only synaptically.
+        distribution: ``"gaussian"`` (default, preserves prior behaviour) or
+            ``"lognormal"``. The lognormal option produces the right-skewed,
+            heavy-tailed firing-rate distribution seen in real cortical
+            populations while keeping the same target ``mean`` and ``sd``.
 
     Returns:
         None. The function mutates each neuron's ``i_baseline`` in place.
     """
     if sd < 0.0:
         raise ValueError("Baseline-drive standard deviation must be non-negative.")
+    if distribution not in ("gaussian", "lognormal"):
+        raise ValueError("distribution must be 'gaussian' or 'lognormal'.")
 
     default_exc_rheobase = (-50.0 - -61.5) / 100.0
     if mean >= default_exc_rheobase:
@@ -299,10 +307,18 @@ def assign_baseline_drive(neurons, mean=0.11, sd=0.05, seed=0, excitatory_only=T
             f"rheobase (~{default_exc_rheobase:.3f} nA-equivalent)."
         )
 
+    # Lognormal parameters chosen so the resulting samples keep the requested
+    # arithmetic mean and standard deviation (method-of-moments mapping).
+    if distribution == "lognormal" and mean > 0.0:
+        log_sigma = float(np.sqrt(np.log(1.0 + (sd / mean) ** 2)))
+        log_mu = float(np.log(mean) - 0.5 * log_sigma ** 2)
+
     rng = np.random.default_rng(seed)
     for neuron in neurons:
         if excitatory_only and neuron.is_inhibitory:
             neuron.i_baseline = 0.0
+        elif distribution == "lognormal" and mean > 0.0:
+            neuron.i_baseline = float(rng.lognormal(log_mu, log_sigma))
         else:
             neuron.i_baseline = max(0.0, float(rng.normal(mean, sd)))
 
@@ -333,6 +349,36 @@ def scale_excitatory_weights(synapses, scale, connections=None):
         for connection in connections:
             if connection[3] == "exc":
                 connection[2] = float(connection[2]) * scale
+
+
+def scale_adaptation_dynamics(
+    neurons, tau_scale=1.0, increment_scale=1.0, excitatory_only=False
+):
+    """Scale spike-frequency-adaptation strength and time constant in place.
+
+    Slowing adaptation recovery (``tau_scale`` > 1) lengthens the post-burst
+    refractory period and spaces network bursts further apart, moving the burst
+    rate toward the seconds-scale spacing seen in dissociated cultures.
+    Increasing ``increment_scale`` deepens the per-spike adaptation, which also
+    reduces burst rate and curbs runaway high-frequency firing.
+
+    Args:
+        neurons: Sequence of ``LIFNeuron`` objects to update.
+        tau_scale: Multiplicative factor applied to ``tau_adaptation``.
+        increment_scale: Multiplicative factor applied to ``adaptation_increment``.
+        excitatory_only: Whether to skip inhibitory neurons.
+
+    Returns:
+        None. The function mutates each neuron's adaptation parameters in place.
+    """
+    if tau_scale <= 0.0 or increment_scale < 0.0:
+        raise ValueError("tau_scale must be > 0 and increment_scale must be >= 0.")
+
+    for neuron in neurons:
+        if excitatory_only and neuron.is_inhibitory:
+            continue
+        neuron.tau_adaptation *= tau_scale
+        neuron.adaptation_increment *= increment_scale
 
 
 def create_clustered_network(

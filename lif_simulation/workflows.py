@@ -4,7 +4,7 @@ from datetime import datetime
 
 from .analysis import report_network_statistics, segment_states
 from .models import NetworkWeightParameters
-from .network import assign_baseline_drive, create_clustered_network, scale_excitatory_weights
+from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
 from .session_io import save_network_structure, save_recording_data
 from .simulation import simulate_network
 from .stimulation import create_periodic_cluster_stimulation
@@ -33,6 +33,10 @@ def sequential_simulation_individual_saves(
     spontaneous_baseline_mean=0.11,
     spontaneous_baseline_sd=0.05,
     spontaneous_baseline_seed=0,
+    spontaneous_baseline_distribution="gaussian",
+    spontaneous_noise_sigma=0.0,
+    spontaneous_adaptation_tau_scale=1.0,
+    spontaneous_adaptation_increment_scale=1.0,
     spontaneous_exc_weight_scale=0.65,
     spontaneous_burst_frac_thresh=0.12,
     burst_interval=7000,
@@ -169,16 +173,22 @@ def sequential_simulation_individual_saves(
         exc_weight_scale = 1.0
     else:
         for neuron in neurons:
-            neuron.noise_sigma = 0.0
+            neuron.noise_sigma = spontaneous_noise_sigma
         assign_baseline_drive(
             neurons,
             mean=spontaneous_baseline_mean,
             sd=spontaneous_baseline_sd,
             seed=spontaneous_baseline_seed,
             excitatory_only=True,
+            distribution=spontaneous_baseline_distribution,
+        )
+        scale_adaptation_dynamics(
+            neurons,
+            tau_scale=spontaneous_adaptation_tau_scale,
+            increment_scale=spontaneous_adaptation_increment_scale,
         )
         scale_excitatory_weights(synapses, spontaneous_exc_weight_scale, connections)
-        actual_background_noise_sigma = 0.0
+        actual_background_noise_sigma = float(spontaneous_noise_sigma)
         baseline_currents = [neuron.i_baseline for neuron in neurons]
         exc_weight_scale = float(spontaneous_exc_weight_scale)
         cluster_info.update(
@@ -279,17 +289,20 @@ def sequential_simulation_individual_saves(
                 elif voltage_storage_backend != "inline_npz":
                     raise ValueError(f"Unsupported voltage_storage_backend: {voltage_storage_backend}")
 
-            stimulation_events, burst_onset_times = create_periodic_cluster_stimulation(
-                neurons,
-                cluster_info,
-                burst_interval=burst_interval,
-                cluster_fraction=cluster_fraction,
-                neurons_per_cluster=neurons_per_cluster,
-                stim_amplitude_range=stim_amplitude_range,
-                stim_duration_range=stim_duration_range,
-                simulation_duration=recording_duration,
-                burst_interval_jitter=burst_interval_jitter,
-            )
+            if stimulation_enabled:
+                stimulation_events, burst_onset_times = create_periodic_cluster_stimulation(
+                    neurons,
+                    cluster_info,
+                    burst_interval=burst_interval,
+                    cluster_fraction=cluster_fraction,
+                    neurons_per_cluster=neurons_per_cluster,
+                    stim_amplitude_range=stim_amplitude_range,
+                    stim_duration_range=stim_duration_range,
+                    simulation_duration=recording_duration,
+                    burst_interval_jitter=burst_interval_jitter,
+                )
+            else:
+                stimulation_events, burst_onset_times = [], []
 
             spike_data, voltage_data = simulate_network(
                 neurons,

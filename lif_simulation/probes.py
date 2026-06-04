@@ -3,7 +3,7 @@ import random
 import numpy as np
 
 from .models import LIFNeuron, NetworkWeightParameters
-from .network import assign_baseline_drive, create_clustered_network, scale_excitatory_weights
+from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
 from .analysis import segment_states
 from .simulation import simulate_network
 
@@ -146,6 +146,10 @@ def run_no_stimulation_validation(
     baseline_drive_mean=0.11,
     baseline_drive_sd=0.05,
     baseline_drive_seed=None,
+    baseline_distribution="gaussian",
+    noise_sigma=0.0,
+    adaptation_tau_scale=1.0,
+    adaptation_increment_scale=1.0,
     exc_weight_scale=0.65,
     state_bin_ms=5.0,
     burst_frac_thresh=0.12,
@@ -233,13 +237,19 @@ def run_no_stimulation_validation(
     )
 
     for neuron in neurons:
-        neuron.noise_sigma = 0.0
+        neuron.noise_sigma = noise_sigma
     assign_baseline_drive(
         neurons,
         mean=baseline_drive_mean,
         sd=baseline_drive_sd,
         seed=baseline_drive_seed,
         excitatory_only=True,
+        distribution=baseline_distribution,
+    )
+    scale_adaptation_dynamics(
+        neurons,
+        tau_scale=adaptation_tau_scale,
+        increment_scale=adaptation_increment_scale,
     )
     scale_excitatory_weights(synapses, exc_weight_scale, connections)
     cluster_info.update(

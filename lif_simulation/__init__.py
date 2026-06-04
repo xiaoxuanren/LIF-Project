@@ -8,7 +8,7 @@ from .analysis import (
     validate_hub_structure,
 )
 from .models import ExpSynapse, LIFNeuron, NetworkWeightParameters
-from .network import assign_baseline_drive, create_clustered_network, scale_excitatory_weights
+from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
 from .plotting import (
     plot_combined_network_layout,
     plot_firing_rates,
@@ -80,6 +80,7 @@ __all__ = [
     "segment_states",
     "simulate_network",
     "scale_excitatory_weights",
+    "scale_adaptation_dynamics",
     "summarize_h_current_step_probe",
     "validate_hub_structure",
 ]
