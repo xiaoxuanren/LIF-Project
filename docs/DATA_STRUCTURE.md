@@ -11,7 +11,9 @@ LIF data/
 └── {timestamp}/                          # e.g. 20260223_130621
     ├── network_{timestamp}.npz           # Network topology (1 per session)
     ├── recording000.npz                  # Individual recording files
+  ├── recording000_voltage.h5           # Chunked full-dt voltage sidecar for recording000
     ├── recording001.npz                  # (n_recordings per session)
+  ├── recording001_voltage.h5           # Optional sidecar per recording when using external HDF5 voltage storage
     ├── ...
     ├── recording_combined.npz            # All recordings merged (created by process_existing_for_gnn.ipynb)
     ├── session_metadata.json             # Session config & recording manifest
@@ -68,9 +70,17 @@ Saved per recording by `save_recording_data()`.
 
 | Key | Type | Shape | Description |
 |-----|------|-------|-------------|
-| `voltage_traces` | ndarray (float64) | `(n_neurons, n_voltage_samples)` | Membrane voltage time series for each neuron (mV). Includes artificial +20 mV spike peaks for visualization. |
-| `voltage_times` | ndarray (float64) | `(n_voltage_samples,)` | Time values for voltage samples (ms) |
-| `voltage_sample_rate` | float | scalar | Voltage sampling interval in ms (default 1.0) |
+| `voltage_times` | ndarray (float32) | `(n_voltage_samples,)` | Time values for voltage samples (ms). When raw full-dt storage is used, spacing equals `dt`. |
+| `voltage_sample_rate` | float | scalar | Actual stored voltage step in ms. For current raw full-dt recordings this equals `dt` (default 0.1). |
+| `voltage_storage_backend` | str | scalar | Storage backend used for the saved voltage trace. Current main-workflow default is `hdf5_external`; legacy sessions may omit this field or store `inline_npz`. |
+| `voltage_units` | str | scalar | Physical units of the saved membrane voltage values. Current sessions store `mV`. |
+| `voltage_traces` | ndarray (float32) | `(n_neurons, n_voltage_samples)` | Inline voltage array used by legacy sessions or smaller inline-save runs. No artificial spike waveform is stamped into the stored data. |
+| `voltage_hdf5_file` | str | scalar | Relative path to the external HDF5 sidecar when `voltage_storage_backend = hdf5_external`. |
+| `voltage_hdf5_dataset` | str | scalar | Dataset name inside the HDF5 sidecar. Current value: `voltage_traces`. |
+| `voltage_n_samples` | int | scalar | Number of stored voltage samples when using external HDF5 voltage storage. |
+| `voltage_dtype` | str | scalar | Stored voltage dtype for external HDF5 datasets. Current default: `float32`. |
+
+When `voltage_storage_backend = hdf5_external`, the heavy full-dt voltage matrix is stored in `recordingNNN_voltage.h5`, while `recordingNNN.npz` retains spike data, resampled outputs, timing metadata, and the pointer to the voltage sidecar.
 
 ### Burst / Stimulation Data (optional)
 
@@ -97,9 +107,9 @@ Created by `process_existing_for_gnn.ipynb`. All individual recordings are merge
 | `spike_times` | ndarray (object) | `(n_neurons,)` | Each element is a sorted 1D array of spike times (ms) across all recordings with time offsets applied |
 | `duration_ms` | int | scalar | Total combined duration in ms (`n_recordings × recording_duration`) |
 | `n_neurons` | int | scalar | Number of neurons |
-| `voltage_traces` | ndarray (float64) | `(n_neurons, total_voltage_samples)` | Concatenated membrane voltage across all recordings *(included if source recordings have voltage data)* |
-| `voltage_times` | ndarray (float64) | `(total_voltage_samples,)` | Time points for concatenated voltage *(optional)* |
-| `voltage_sample_rate` | float | scalar | Voltage sampling interval in ms *(optional)* |
+| `voltage_traces` | ndarray (float32) | `(n_neurons, total_voltage_samples)` | Concatenated raw membrane voltage across all recordings *(included if source recordings have voltage data)* |
+| `voltage_times` | ndarray (float32) | `(total_voltage_samples,)` | Time points for concatenated voltage *(optional)* |
+| `voltage_sample_rate` | float | scalar | Actual stored voltage step in ms *(optional)* |
 
 ---
 
@@ -119,11 +129,17 @@ Saved by `sequential_simulation_individual_saves()`. Contains all simulation par
   "target_freq": 20,
   "dt": 0.1,
   "record_voltage": true,
-  "voltage_sample_rate": 1.0,
+  "voltage_sample_rate": 0.1,
+  "requested_voltage_sample_rate": 1.0,
+  "voltage_trace_mode": "raw_full_dt",
+  "voltage_storage_backend": "hdf5_external",
+  "voltage_chunk_samples": 4096,
   "space_size": 15,
   "max_connection_distance": 8.0,
   "network_file": "LIF data\\20260223_130621\\network_20260223_130621.npz",
   "mode": "stimulus_driven_bursting",
+  "use_h_current": true,
+  "h_current_mode": "enabled",
   "background_input": false,
   "burst_interval": 7000,
   "burst_interval_jitter": 1500,
@@ -159,6 +175,12 @@ Saved by `sequential_simulation_individual_saves()`. Contains all simulation par
 | `num_connections` | int | Total synapse count |
 | `target_freq` | int | Resampling frequency (Hz) |
 | `dt` | float | Simulation time step (ms) |
+| `voltage_sample_rate` | float | Actual stored voltage step in ms for saved traces |
+| `requested_voltage_sample_rate` | float | Legacy requested voltage sampling interval retained for compatibility |
+| `voltage_trace_mode` | str | Records whether saved voltage traces use raw full-dt storage or a legacy sampled mode |
+| `voltage_storage_backend` | str | Records whether saved voltage traces live inline or in external chunked HDF5 sidecars |
+| `use_h_current` | bool | Whether session neurons used slow h-current dynamics |
+| `h_current_mode` | str | Records whether h-current was enabled or disabled by skipping the update path |
 | `recordings` | list | Manifest of recording files with success status and spike counts |
 
 ---
@@ -202,4 +224,4 @@ Created by `process_existing_for_gnn.ipynb`. Points to the combined recording fi
 | Recordings per session | 1–20 |
 | Per-recording duration | 60,000 ms (60 s) |
 | Resampled time points per recording | 1,200 (at 20 Hz) |
-| Voltage samples per recording | 60,000 (at 1.0 ms rate) |
+| Voltage samples per recording | 600,000 (at 0.1 ms rate) |

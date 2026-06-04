@@ -2,7 +2,12 @@ import argparse
 import csv
 import json
 import os
+import sys
 import time
+from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import matplotlib
 matplotlib.use('Agg')
@@ -11,7 +16,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from voltage_augmented_learned_lif_connectivity import (
+from lif_inference.voltage_augmented_learned_lif_connectivity import (
     VoltageAugmentedPerNeuronLIF,
     build_ground_truth,
     build_train_val_voltage_datasets,
@@ -24,21 +29,64 @@ from voltage_augmented_learned_lif_connectivity import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def parse_lambdas(raw_values):
+    """Parse a comma-separated lambda list into floating-point values.
+
+    Args:
+        raw_values: Comma-separated string such as ``"0,0.25,1"``.
+
+    Returns:
+        A list of floating-point lambda values in the order supplied by the user.
+    """
     return [float(value.strip()) for value in raw_values.split(',') if value.strip()]
 
 
 def lambda_tag(value):
+    """Convert one lambda value into a filesystem-friendly tag.
+
+    Args:
+        value: Numeric lambda value.
+
+    Returns:
+        A short string safe to embed in filenames.
+    """
     text = f'{value:g}'
     return text.replace('-', 'm').replace('.', 'p')
 
 
 def output_stem(session_name, k, epochs, batch_size, candidate_mode, spatial_frac, max_delay):
+    """Build the shared filename stem used for sweep artifacts.
+
+    Args:
+        session_name: Session name used as the base label.
+        k: Number of candidate neighbors per neuron.
+        epochs: Number of training epochs per sweep run.
+        batch_size: Mini-batch size used during training.
+        candidate_mode: Candidate-edge generation mode.
+        spatial_frac: Fraction of candidates drawn from spatial neighbors.
+        max_delay: Maximum delay bin used by the learned-LIF model.
+
+    Returns:
+        A compact filename stem shared by the sweep outputs.
+    """
     spatial_pct = int(round(float(spatial_frac) * 100.0))
     return f'{session_name}_k{k}_e{epochs}_b{batch_size}_{candidate_mode}_sf{spatial_pct}_lag{max_delay}'
 
 
 def prepare_shared_context(args):
+    """Load shared data, candidates, and datasets once for the full lambda sweep.
+
+    Args:
+        args: Parsed CLI namespace describing the session, candidate settings, and
+            event-window configuration used for every lambda value in the sweep.
+
+    Returns:
+        A dictionary containing the shared loaded data, candidate sets, ground truth,
+        validation metadata, and train/validation dataloaders reused across runs.
+    """
     print(f"\n{'=' * 70}")
     print('VOLTAGE-LAMBDA SWEEP FOR VOLTAGE-AUGMENTED LEARNED LIF')
     print(f'Session: {os.path.basename(args.session)}')
@@ -48,6 +96,7 @@ def prepare_shared_context(args):
     print(f"{'=' * 70}")
 
     print('\nLoading shared data...')
+    # Load candidates and event windows once so every lambda sees the same data slice.
     data = load_all_recordings_with_voltage(
         args.session,
         dt=args.dt,
@@ -135,6 +184,19 @@ def prepare_shared_context(args):
 
 
 def train_single_lambda(args, shared, voltage_lambda, output_dir, base_stem):
+    """Train and export one voltage-augmented model for a single lambda value.
+
+    Args:
+        args: Parsed CLI namespace controlling training hyperparameters and outputs.
+        shared: Dictionary returned by `prepare_shared_context` with fixed data and loaders.
+        voltage_lambda: Voltage-loss weight to evaluate in this run.
+        output_dir: Directory where checkpoints and connectivity outputs are written.
+        base_stem: Shared artifact stem used to keep run names aligned across lambdas.
+
+    Returns:
+        A dictionary summarizing the run configuration, saved artifact paths, elapsed
+        time, best epoch, and held-out validation/connectivity metrics.
+    """
     session_name = os.path.basename(args.session)
     run_tag = f'{base_stem}_vl{lambda_tag(voltage_lambda)}'
     output_name = f'{session_name}_{run_tag}'
@@ -144,6 +206,7 @@ def train_single_lambda(args, shared, voltage_lambda, output_dir, base_stem):
     print(f'Starting voltage_lambda={voltage_lambda:g} ({output_name})')
     print(f"{'-' * 70}")
 
+    # Only the voltage-loss weight changes across runs; the shared context stays fixed.
     model = VoltageAugmentedPerNeuronLIF(
         n_neurons=shared['n_neurons'],
         K=shared['k_actual'],
@@ -294,9 +357,20 @@ def train_single_lambda(args, shared, voltage_lambda, output_dir, base_stem):
 
 
 def save_summary_files(records, output_dir, prefix):
+    """Write machine-readable JSON and CSV summaries for the completed sweep.
+
+    Args:
+        records: Per-lambda run summaries produced by the sweep.
+        output_dir: Directory where the JSON and CSV files are written.
+        prefix: Shared filename prefix used for both summary files.
+
+    Returns:
+        A tuple containing the JSON summary path and CSV summary path.
+    """
     json_path = os.path.join(output_dir, f'{prefix}.json')
     csv_path = os.path.join(output_dir, f'{prefix}.csv')
 
+    # Export machine-readable summaries so later notebook analysis does not need to parse logs.
     with open(json_path, 'w', encoding='utf-8') as handle:
         json.dump(records, handle, indent=2)
 
@@ -335,8 +409,19 @@ def save_summary_files(records, output_dir, prefix):
 
 
 def save_sweep_plot(records, output_dir, prefix):
+    """Render the aggregate metric curves across all swept lambda values.
+
+    Args:
+        records: Per-lambda run summaries produced by the sweep.
+        output_dir: Directory where the plot is written.
+        prefix: Filename prefix used for the saved PNG.
+
+    Returns:
+        The path to the saved sweep plot PNG.
+    """
     lambdas = np.array([record['lambda'] for record in records], dtype=np.float32)
     order = np.argsort(lambdas)
+    # Sort numerically before plotting because the CLI accepts arbitrary comma-separated order.
     ordered = [records[index] for index in order]
     lambdas = lambdas[order]
 
@@ -401,6 +486,15 @@ def save_sweep_plot(records, output_dir, prefix):
 
 
 def main():
+    """Parse CLI arguments, run the lambda sweep, and save aggregate artifacts.
+
+    Args:
+        None.
+
+    Returns:
+        None. The function trains one model per lambda value and writes the sweep
+        summaries, checkpoints, and plot outputs to disk.
+    """
     parser = argparse.ArgumentParser(description='Shared-data sweep over voltage_lambda values')
     parser.add_argument('--session', type=str, required=True)
     parser.add_argument('--lambdas', type=str, default='0,0.25,0.5,1,4')
@@ -431,7 +525,7 @@ def main():
     if args.device == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA requested but not available')
 
-    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'voltage_augmented_learned_lif_outputs')
+    output_dir = REPO_ROOT / 'voltage_augmented_learned_lif_outputs'
     os.makedirs(output_dir, exist_ok=True)
 
     lambda_values = parse_lambdas(args.lambdas)
@@ -451,6 +545,7 @@ def main():
 
     records = []
     sweep_start = time.time()
+    # Reuse the shared candidate set and train/val split across all lambda values for a fair sweep.
     for value in lambda_values:
         records.append(train_single_lambda(args, shared, value, output_dir, base_stem))
 

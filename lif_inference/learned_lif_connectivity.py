@@ -32,12 +32,24 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 # ============================================================================
 # DATA
 # ============================================================================
 
 def spike_times_to_binary(spike_times, duration_ms, dt=1.0):
-    """Convert spike times to binary matrix [n_neurons, T] at dt resolution."""
+    """Convert per-neuron spike times into a binary spike matrix.
+
+    Args:
+        spike_times: Sequence of per-neuron spike-time arrays in milliseconds.
+        duration_ms: Recording duration in milliseconds.
+        dt: Target bin width in milliseconds.
+
+    Returns:
+        A binary matrix with shape ``[n_neurons, T]`` sampled at ``dt`` resolution.
+    """
     n_neurons = len(spike_times)
     n_bins = int(duration_ms / dt)
     binary = np.zeros((n_neurons, n_bins), dtype=np.float32)
@@ -50,7 +62,17 @@ def spike_times_to_binary(spike_times, duration_ms, dt=1.0):
 
 
 def build_ground_truth(connections, n_neurons):
-    """W[post, pre] = weight, B[post, pre] = 1 if connected."""
+    """Build dense ground-truth weight and connectivity matrices.
+
+    Args:
+        connections: Connection table whose rows encode presynaptic id,
+            postsynaptic id, and synaptic weight.
+        n_neurons: Total number of neurons in the network.
+
+    Returns:
+        A tuple ``(W, B)`` where ``W[post, pre]`` stores the signed weight and
+        ``B[post, pre]`` stores a binary connectivity flag.
+    """
     W = np.zeros((n_neurons, n_neurons), dtype=np.float32)
     B = np.zeros((n_neurons, n_neurons), dtype=np.int32)
     for c in connections:
@@ -61,7 +83,17 @@ def build_ground_truth(connections, n_neurons):
 
 
 def compute_spatial_neighbor_indices(neuron_positions, K):
-    """For each neuron, find K nearest spatial neighbors."""
+    """Find the nearest spatial candidate presynaptic neurons for each neuron.
+
+    Args:
+        neuron_positions: Array of neuron coordinates with shape ``[n_neurons, 2]``.
+        K: Requested number of spatial neighbors per neuron.
+
+    Returns:
+        A tuple ``(indices, K_actual, dist)`` containing the nearest-neighbor
+        indices, the usable neighbor count after clipping, and the full distance
+        matrix.
+    """
     n = len(neuron_positions)
     dist = np.sqrt(((neuron_positions[:, None, :] -
                      neuron_positions[None, :, :]) ** 2).sum(axis=2))
@@ -72,7 +104,17 @@ def compute_spatial_neighbor_indices(neuron_positions, K):
 
 
 def build_recording_spike_indices(spike_matrix, boundaries=None, excluded_bins=None):
-    """Build per-recording spike index lists for each neuron."""
+    """Build per-recording spike index lists for each neuron.
+
+    Args:
+        spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+        boundaries: Optional concatenated recording boundaries.
+        excluded_bins: Optional sorted bins to ignore when extracting spikes.
+
+    Returns:
+        A tuple ``(spike_indices, spike_counts)`` containing per-recording spike
+        indices for each neuron and total retained spike counts per neuron.
+    """
     n_neurons, T = spike_matrix.shape
     if boundaries is None:
         boundaries = [0, T]
@@ -107,9 +149,17 @@ def build_recording_spike_indices(spike_matrix, boundaries=None, excluded_bins=N
 
 
 def causal_pair_score(pre_spikes, post_spikes, min_lag=1, max_lag=8):
-    """
-    Score a candidate edge by how often a presynaptic spike closely precedes a
-    postsynaptic spike. Shorter lags receive more weight.
+    """Score a candidate edge from short-latency pre-before-post spike pairs.
+
+    Args:
+        pre_spikes: Sorted presynaptic spike-bin indices.
+        post_spikes: Sorted postsynaptic spike-bin indices.
+        min_lag: Minimum causal lag considered valid.
+        max_lag: Maximum causal lag considered valid.
+
+    Returns:
+        A nonnegative temporal-causality score where shorter valid lags contribute
+        more weight.
     """
     if len(pre_spikes) == 0 or len(post_spikes) == 0:
         return 0.0
@@ -132,11 +182,18 @@ def causal_pair_score(pre_spikes, post_spikes, min_lag=1, max_lag=8):
 def compute_temporal_candidate_scores(spike_matrix, boundaries=None,
                                       min_lag=1, max_lag=8,
                                       excluded_bins=None):
-    """
-    Compute causal temporal candidate scores from spike timing alone.
+    """Compute causal temporal candidate scores from spike timing alone.
 
-    Scores are accumulated within recordings only, so concatenated sessions do
-    not introduce cross-recording leakage.
+    Args:
+        spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+        boundaries: Optional concatenated recording boundaries.
+        min_lag: Minimum causal lag considered valid.
+        max_lag: Maximum causal lag considered valid.
+        excluded_bins: Optional sorted bins excluded from temporal scoring.
+
+    Returns:
+        A ``[n_neurons, n_neurons]`` score matrix where larger values indicate
+        stronger causal spike-timing support for a presynaptic candidate.
     """
     n_neurons = spike_matrix.shape[0]
     spike_indices_by_recording, spike_counts = build_recording_spike_indices(
@@ -145,6 +202,7 @@ def compute_temporal_candidate_scores(spike_matrix, boundaries=None,
 
     scores = np.zeros((n_neurons, n_neurons), dtype=np.float32)
 
+    # Score only within-recording spike pairs so concatenated sessions do not create fake causal lags.
     for rec_spikes in spike_indices_by_recording:
         active_neurons = [idx for idx, spikes in enumerate(rec_spikes)
                           if len(spikes) > 0]
@@ -173,12 +231,23 @@ def compute_neighbor_indices(neuron_positions, K, spike_matrix=None,
                              excluded_bins=None,
                              temporal_min_lag=1,
                              temporal_max_lag=8):
-    """
-    Build candidate presynaptic sets for each postsynaptic neuron.
+    """Build candidate presynaptic sets for each postsynaptic neuron.
 
-    Modes:
-      - spatial: pure K-nearest neighbors in physical space
-      - hybrid: mix nearest spatial neighbors with top causal temporal matches
+    Args:
+        neuron_positions: Array of neuron coordinates with shape ``[n_neurons, 2]``.
+        K: Requested number of candidate presynaptic neurons per postsynaptic neuron.
+        spike_matrix: Optional binary spike matrix used for temporal candidate scoring.
+        mode: Candidate-selection mode, typically ``spatial`` or ``hybrid``.
+        boundaries: Optional concatenated recording boundaries.
+        spatial_frac: In hybrid mode, fraction of candidates reserved for spatial neighbors.
+        excluded_bins: Optional sorted bins excluded from temporal candidate scoring.
+        temporal_min_lag: Minimum causal lag used by temporal scoring.
+        temporal_max_lag: Maximum causal lag used by temporal scoring.
+
+    Returns:
+        A tuple ``(neighbor_indices, K_actual, info)`` containing the candidate
+        matrix, the usable candidate count, and metadata describing how the
+        candidate set was built.
     """
     spatial_indices, K_actual, _ = compute_spatial_neighbor_indices(
         neuron_positions, K,
@@ -221,6 +290,7 @@ def compute_neighbor_indices(neuron_positions, K, spike_matrix=None,
         chosen = []
         chosen_set = {post_id}
 
+        # Keep spatial neighbors as the backbone, then let strong temporal candidates fill the rest.
         for pre_id in spatial_indices[post_id]:
             if pre_id in chosen_set:
                 continue
@@ -278,6 +348,10 @@ def load_all_recordings(session_dir, dt=1.0):
     """
     Load and concatenate ALL recordings in a session along the time axis.
 
+    Args:
+        session_dir: Session directory containing recording files and one network file.
+        dt: Bin width in milliseconds used to convert spike times into binary traces.
+
     Returns:
         spike_matrix: [n_neurons, total_T] concatenated spike trains
         total_duration: total duration in ms
@@ -306,6 +380,7 @@ def load_all_recordings(session_dir, dt=1.0):
         spike_matrix = spike_times_to_binary(data['spike_times'], duration, dt)
         all_matrices.append(spike_matrix)
 
+        # Carry stimulation onsets forward so downstream fitting can exclude obviously driven bins.
         if 'burst_onset_times' in data.files:
             rec_burst_onsets = np.asarray(data['burst_onset_times'], dtype=float)
             rec_burst_onsets = rec_burst_onsets[
@@ -336,7 +411,15 @@ def load_all_recordings(session_dir, dt=1.0):
 
 
 def merge_excluded_windows(excluded_windows, max_gap_bins=0):
-    """Merge overlapping or nearby [start, end) exclusion windows."""
+    """Merge overlapping or nearby ``[start, end)`` exclusion windows.
+
+    Args:
+        excluded_windows: Iterable of exclusion windows in bin coordinates.
+        max_gap_bins: Maximum bin gap allowed when merging adjacent windows.
+
+    Returns:
+        A ``[n_windows, 2]`` array of merged exclusion windows.
+    """
     if excluded_windows is None or len(excluded_windows) == 0:
         return np.zeros((0, 2), dtype=np.int32)
 
@@ -361,7 +444,14 @@ def merge_excluded_windows(excluded_windows, max_gap_bins=0):
 
 
 def excluded_windows_to_bins(excluded_windows):
-    """Expand exclusion windows into sorted bin indices."""
+    """Expand exclusion windows into sorted bin indices.
+
+    Args:
+        excluded_windows: Iterable of exclusion windows in bin coordinates.
+
+    Returns:
+        A sorted one-dimensional array containing every excluded bin index.
+    """
     if excluded_windows is None or len(excluded_windows) == 0:
         return np.array([], dtype=np.int32)
 
@@ -376,7 +466,14 @@ def excluded_windows_to_bins(excluded_windows):
 
 
 def combine_excluded_bins(*bin_arrays):
-    """Combine multiple exclusion-bin sources into one sorted unique array."""
+    """Combine multiple exclusion-bin sources into one sorted unique array.
+
+    Args:
+        *bin_arrays: Any number of one-dimensional bin-index arrays.
+
+    Returns:
+        A sorted unique array containing the union of all supplied bin indices.
+    """
     valid_arrays = []
     for bins in bin_arrays:
         if bins is None:
@@ -391,7 +488,14 @@ def combine_excluded_bins(*bin_arrays):
 
 
 def _find_true_segments(mask):
-    """Return contiguous [start, end) segments where mask is True."""
+    """Return contiguous ``[start, end)`` segments where a mask is true.
+
+    Args:
+        mask: One-dimensional boolean array.
+
+    Returns:
+        A list of half-open index segments where ``mask`` remains true.
+    """
     if mask.size == 0 or not np.any(mask):
         return []
 
@@ -412,12 +516,24 @@ def detect_network_burst_windows(spike_matrix, recording_boundaries,
                                  merge_gap_ms=150,
                                  pad_before_ms=100,
                                  pad_after_ms=250):
-    """
-    Detect network-wide burst windows from population synchrony.
+    """Detect network-wide burst windows from population synchrony.
 
-    Uses the fraction of neurons active in coarse time bins, smooths the trace,
-    thresholds it relative to baseline, merges nearby segments, and pads the
-    resulting windows to cover pre-burst recruitment and burst tails.
+    Args:
+        spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+        recording_boundaries: Concatenated recording boundaries.
+        dt_ms: Spike-bin width in milliseconds.
+        activity_bin_ms: Width of the coarse activity bins in milliseconds.
+        smooth_bins: Width of the moving-average smoothing kernel in bins.
+        threshold_std: Threshold scale factor used in ``mean + std_factor * std``.
+        min_active_fraction: Minimum active-neuron fraction required for a burst.
+        min_burst_duration_ms: Minimum detected burst duration in milliseconds.
+        merge_gap_ms: Maximum allowed gap when merging nearby burst windows.
+        pad_before_ms: Padding added before each detected burst window.
+        pad_after_ms: Padding added after each detected burst window.
+
+    Returns:
+        A dictionary containing the detected windows, excluded bins, per-recording
+        burst counts, and the thresholding parameters used to find them.
     """
     n_neurons, T = spike_matrix.shape
     if recording_boundaries is None:
@@ -502,7 +618,17 @@ def detect_network_burst_windows(spike_matrix, recording_boundaries,
 
 
 def window_overlaps_excluded_bins(start, end, excluded_bins):
-    """Return True if [start, end) contains any excluded bin."""
+    """Check whether a candidate window overlaps any excluded bin.
+
+    Args:
+        start: Window start index.
+        end: Window end index.
+        excluded_bins: Sorted one-dimensional array of excluded bin indices.
+
+    Returns:
+        ``True`` when the half-open window ``[start, end)`` contains at least one
+        excluded bin, otherwise ``False``.
+    """
     if excluded_bins is None or len(excluded_bins) == 0:
         return False
 
@@ -601,10 +727,36 @@ def find_event_windows(spike_matrix, neuron_id, pre_context=50, post_context=10,
 
 
 class NeuronDataset(Dataset):
-    """Each sample = one postsynaptic neuron with K pre candidates."""
+    """Dataset exposing one full recording trace per postsynaptic neuron.
+
+    Args:
+        spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+        neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+        true_binary: Dense binary ground-truth connectivity matrix.
+        true_weights: Dense signed ground-truth weight matrix.
+        neuron_positions: Spatial coordinates for each neuron.
+        neuron_ids: Optional subset of postsynaptic neurons to expose.
+
+    Returns:
+        An initialized ``NeuronDataset`` instance for the older full-trace training
+        path.
+    """
 
     def __init__(self, spike_matrix, neighbor_indices, true_binary, true_weights,
                  neuron_positions, neuron_ids=None):
+        """Initialize the full-trace dataset used by the older training path.
+
+        Args:
+            spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+            neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+            true_binary: Dense binary ground-truth connectivity matrix.
+            true_weights: Dense signed ground-truth weight matrix.
+            neuron_positions: Spatial coordinates for each neuron.
+            neuron_ids: Optional subset of postsynaptic neurons to expose.
+
+        Returns:
+            None. The constructor stores the arrays needed for indexed dataset access.
+        """
         self.spike_matrix = spike_matrix
         self.neighbor_indices = neighbor_indices
         self.true_binary = true_binary
@@ -614,9 +766,26 @@ class NeuronDataset(Dataset):
             np.arange(len(spike_matrix))
 
     def __len__(self):
+        """Return the number of postsynaptic neurons exposed by the dataset.
+
+        Args:
+            None.
+
+        Returns:
+            The number of postsynaptic neurons represented by this dataset.
+        """
         return len(self.neuron_ids)
 
     def __getitem__(self, idx):
+        """Return one postsynaptic neuron's candidate inputs and supervision.
+
+        Args:
+            idx: Dataset index selecting one postsynaptic neuron.
+
+        Returns:
+            A tuple containing candidate presynaptic spikes, postsynaptic spikes,
+            binary labels, true weights, and the postsynaptic neuron id.
+        """
         post_id = self.neuron_ids[idx]
         pre_ids = self.neighbor_indices[post_id]
 
@@ -645,12 +814,48 @@ class EventWindowDataset(Dataset):
     on ~60 carefully-chosen bins × (n_pos + n_neg) events per neuron.
     This fixes the class imbalance problem that caused the trivial "always zero"
     solution.
+
+    Args:
+        spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+        neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+        neuron_ids: Optional subset of postsynaptic neurons to expose.
+        pre_context: Number of causal bins kept before each event.
+        post_context: Number of bins kept after each event.
+        warmup: Number of leading bins excluded from the loss.
+        neg_ratio: Target number of negative windows per positive window.
+        neg_min_distance: Minimum distance from any postsynaptic spike for negatives.
+        boundaries: Optional concatenated recording boundaries.
+        excluded_bins: Optional sorted bins excluded from all windows.
+        rng_seed: Base random seed used when sampling windows.
+        windows: Optional precomputed windows to load instead of regenerating.
+
+    Returns:
+        An initialized ``EventWindowDataset`` instance.
     """
 
     def __init__(self, spike_matrix, neighbor_indices, neuron_ids=None,
                  pre_context=50, post_context=10, warmup=30,
                  neg_ratio=1.0, neg_min_distance=100, boundaries=None,
                  excluded_bins=None, rng_seed=42, windows=None):
+        """Build or load positive and negative event windows for focused training.
+
+        Args:
+            spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+            neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+            neuron_ids: Optional subset of postsynaptic neurons to expose.
+            pre_context: Number of causal bins kept before each event.
+            post_context: Number of bins kept after each event.
+            warmup: Number of leading bins excluded from the loss.
+            neg_ratio: Target number of negative windows per positive window.
+            neg_min_distance: Minimum distance from any postsynaptic spike for negatives.
+            boundaries: Optional concatenated recording boundaries.
+            excluded_bins: Optional sorted bins excluded from all windows.
+            rng_seed: Base random seed used when sampling windows.
+            windows: Optional precomputed windows to load instead of regenerating.
+
+        Returns:
+            None. The constructor populates the window list and summary counts.
+        """
         self.spike_matrix = spike_matrix
         self.neighbor_indices = neighbor_indices
         self.pre_context = pre_context
@@ -694,9 +899,26 @@ class EventWindowDataset(Dataset):
         self.n_neg = sum(1 for _, _, _, is_pos in self.windows if is_pos == 0)
 
     def __len__(self):
+        """Return the number of extracted event windows.
+
+        Args:
+            None.
+
+        Returns:
+            The number of stored event windows.
+        """
         return len(self.windows)
 
     def __getitem__(self, idx):
+        """Return one event window of presynaptic and postsynaptic spikes.
+
+        Args:
+            idx: Dataset index selecting one event window.
+
+        Returns:
+            A tuple containing candidate presynaptic spikes, postsynaptic spikes,
+            the postsynaptic neuron id, and a positive/negative window label.
+        """
         post_id, start, end, is_pos = self.windows[idx]
         pre_ids = self.neighbor_indices[post_id]
         pre_spikes = self.spike_matrix[pre_ids, start:end].astype(np.float32)
@@ -709,12 +931,16 @@ class EventWindowDataset(Dataset):
 
 
 def split_event_windows(windows, val_fraction=0.2, rng_seed=42):
-    """
-    Split event windows into train/validation subsets while keeping every
-    postsynaptic neuron in the training set.
+    """Split event windows into train and validation subsets.
 
-    Stratifies by (post_id, is_positive) so each neuron keeps both positive and
-    negative training windows whenever possible.
+    Args:
+        windows: Iterable of ``(post_id, start, end, is_positive)`` tuples.
+        val_fraction: Fraction of windows reserved for validation.
+        rng_seed: Random seed used for shuffling within each stratified group.
+
+    Returns:
+        A tuple ``(train_windows, val_windows)`` stratified by postsynaptic neuron
+        and positive/negative label where possible.
     """
     windows = list(windows)
     if not windows or val_fraction <= 0:
@@ -753,7 +979,16 @@ def split_event_windows(windows, val_fraction=0.2, rng_seed=42):
 
 
 def split_recording_boundaries(boundaries, val_fraction=0.2):
-    """Split concatenated recording boundaries into train and validation sets."""
+    """Split concatenated recording boundaries into train and validation groups.
+
+    Args:
+        boundaries: Concatenated recording boundaries such as ``[0, T1, T1+T2, ...]``.
+        val_fraction: Fraction of recordings to reserve for validation.
+
+    Returns:
+        A tuple ``(train_boundaries, val_boundaries)``. ``val_boundaries`` is
+        ``None`` when a recording-level split is not possible.
+    """
     if boundaries is None or len(boundaries) < 3 or val_fraction <= 0:
         return boundaries, None
 
@@ -774,11 +1009,25 @@ def build_train_val_event_datasets(spike_matrix, neighbor_indices, neuron_ids,
                                    boundaries=None, excluded_bins=None,
                                    val_fraction=0.2,
                                    rng_seed=42):
-    """
-    Build train/validation event datasets that match the per-neuron model.
+    """Build train and validation event datasets for the per-neuron model.
 
-    If multiple recordings are available, hold out entire recordings for the
-    same neurons. Otherwise, hold out a fraction of event windows per neuron.
+    Args:
+        spike_matrix: Binary spike matrix with shape ``[n_neurons, T]``.
+        neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+        neuron_ids: Postsynaptic neurons to include in the datasets.
+        pre_context: Number of causal bins kept before each event.
+        post_context: Number of bins kept after each event.
+        warmup: Number of leading bins excluded from the loss.
+        neg_ratio: Target number of negative windows per positive window.
+        neg_min_distance: Minimum distance from any postsynaptic spike for negatives.
+        boundaries: Optional concatenated recording boundaries.
+        excluded_bins: Optional sorted bins excluded from all windows.
+        val_fraction: Fraction reserved for validation.
+        rng_seed: Base random seed used for window sampling and splitting.
+
+    Returns:
+        A tuple ``(train_ds, val_ds, strategy)`` containing the two datasets and a
+        human-readable description of the split strategy that was used.
     """
     train_boundaries, val_boundaries = split_recording_boundaries(boundaries, val_fraction)
 
@@ -850,9 +1099,29 @@ class PerNeuronLIF(nn.Module):
         V(t) -= reset_strength * spike_prob(t)
 
     After training, connectivity matrix = W.
+
+    Args:
+        n_neurons: Number of postsynaptic neurons modeled in parallel.
+        K: Number of candidate presynaptic neurons per postsynaptic neuron.
+        max_delay: Number of discrete delay bins modeled per candidate synapse.
+
+    Returns:
+        An initialized ``PerNeuronLIF`` module with learnable connectivity and
+        delay parameters.
     """
 
     def __init__(self, n_neurons, K, max_delay=5):
+        """Initialize the differentiable per-neuron LIF model.
+
+        Args:
+            n_neurons: Number of postsynaptic neurons modeled in parallel.
+            K: Number of candidate presynaptic neurons per postsynaptic neuron.
+            max_delay: Number of discrete delay bins modeled per candidate synapse.
+
+        Returns:
+            None. The constructor allocates the learnable weights, delay logits,
+            and shared membrane parameters.
+        """
         super().__init__()
         self.n_neurons = n_neurons
         self.K = K
@@ -874,6 +1143,14 @@ class PerNeuronLIF(nn.Module):
 
     @property
     def alpha(self):
+        """Return the membrane leak factor constrained to the open interval ``(0, 1)``.
+
+        Args:
+            None.
+
+        Returns:
+            The shared membrane leak factor derived from ``alpha_logit``.
+        """
         return torch.sigmoid(self.alpha_logit)
 
     def forward(self, pre_spikes, post_spikes, neuron_ids, tbptt_len=1000):
@@ -956,6 +1233,9 @@ class PerNeuronLIF(nn.Module):
         """
         Assemble full [n_neurons, n_neurons] connectivity matrix from learned weights.
 
+        Args:
+            neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+
         Returns:
             conn_matrix: [n_neurons, n_neurons] where conn_matrix[post, pre] = weight
         """
@@ -970,7 +1250,14 @@ class PerNeuronLIF(nn.Module):
         return conn_matrix
 
     def get_learned_delays(self, neighbor_indices):
-        """Assemble delay matrix [n_neurons, n_neurons] from learned delay distributions."""
+        """Assemble a dense delay matrix from the learned delay distributions.
+
+        Args:
+            neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+
+        Returns:
+            A dense ``[n_neurons, n_neurons]`` matrix of expected learned delays.
+        """
         delay_weights = F.softmax(self.delay_logits, dim=-1).detach().cpu().numpy()
         delay_values = np.arange(self.max_delay)
         n = self.n_neurons
@@ -989,12 +1276,18 @@ class PerNeuronLIF(nn.Module):
 # ============================================================================
 
 def compute_loss(spike_probs, post_spikes, weights, pos_weight=5.0, l1_lambda=0.01):
-    """
-    Loss = spike prediction BCE + L1 sparsity on weights.
+    """Compute the full-trace spike prediction and sparsity loss.
 
-    The spike prediction loss is the main signal: weights that help predict
-    post spikes grow, weights that add noise shrink.
-    L1 pushes unneeded weights to exactly zero.
+    Args:
+        spike_probs: Predicted postsynaptic spike probabilities.
+        post_spikes: Ground-truth postsynaptic spike train.
+        weights: Learned candidate weights for the current batch.
+        pos_weight: Positive-class weighting used in the spike BCE term.
+        l1_lambda: Weight on L1 sparsity regularization.
+
+    Returns:
+        A tuple containing the total loss tensor, scalar spike BCE loss, and
+        scalar L1 penalty.
     """
     weight_mask = torch.where(post_spikes == 1, pos_weight, 1.0)
     spike_loss = F.binary_cross_entropy(
@@ -1005,6 +1298,19 @@ def compute_loss(spike_probs, post_spikes, weights, pos_weight=5.0, l1_lambda=0.
 
 
 def train_epoch(model, dataloader, optimizer, device, pos_weight, l1_lambda):
+    """Run one training epoch on the full-trace per-neuron dataset.
+
+    Args:
+        model: ``PerNeuronLIF`` model being optimized.
+        dataloader: DataLoader yielding full-trace neuron samples.
+        optimizer: Optimizer used for parameter updates.
+        device: Torch device where training runs.
+        pos_weight: Positive-class weighting used in the spike BCE term.
+        l1_lambda: Weight on L1 sparsity regularization.
+
+    Returns:
+        A tuple of mean total loss, mean spike loss, and mean L1 loss across the epoch.
+    """
     model.train()
     total_loss = 0
     total_spike = 0
@@ -1037,6 +1343,17 @@ def compute_event_loss(spike_probs, post_spikes, weights, warmup,
     """
     Event-window loss: only compute BCE on non-warmup region of each window.
 
+    Args:
+        spike_probs: Predicted postsynaptic spike probabilities for each event window.
+        post_spikes: Ground-truth postsynaptic spike windows.
+        weights: Learned candidate weights for the batch.
+        warmup: Number of leading bins excluded from the loss.
+        pos_weight: Positive-class weighting used in the spike BCE term.
+        l1_lambda: Weight on L1 sparsity regularization.
+
+    Returns:
+        The total loss tensor, scalar spike loss, and scalar L1 loss.
+
     The first `warmup` bins of each window let membrane voltage settle;
     no loss is computed there. Loss is only on the causal region
     [warmup : window_len] where the post spike may or may not occur.
@@ -1055,7 +1372,20 @@ def compute_event_loss(spike_probs, post_spikes, weights, warmup,
 
 def train_epoch_events(model, dataloader, optimizer, device, pos_weight,
                        l1_lambda, warmup):
-    """Training epoch using event-window batches."""
+    """Run one event-window training epoch for the spike-only model.
+
+    Args:
+        model: Learned-LIF model being optimized.
+        dataloader: Event-window dataloader yielding training batches.
+        optimizer: Torch optimizer used to update model parameters.
+        device: Torch device where computation runs.
+        pos_weight: Positive-class weighting used in the spike BCE term.
+        l1_lambda: Weight on L1 sparsity regularization.
+        warmup: Number of leading bins excluded from the event loss.
+
+    Returns:
+        Mean total loss, mean spike loss, and mean L1 loss across batches.
+    """
     model.train()
     total_loss = 0
     total_spike = 0
@@ -1092,7 +1422,19 @@ def train_epoch_events(model, dataloader, optimizer, device, pos_weight,
 @torch.no_grad()
 def evaluate_event_windows(model, dataloader, device, pos_weight,
                            l1_lambda, warmup):
-    """Evaluate spike-prediction loss on held-out event windows."""
+    """Evaluate spike prediction on held-out event windows.
+
+    Args:
+        model: Learned-LIF model being evaluated.
+        dataloader: Event-window dataloader yielding validation batches.
+        device: Torch device where computation runs.
+        pos_weight: Positive-class weighting used in the spike BCE term.
+        l1_lambda: Weight on L1 sparsity regularization.
+        warmup: Number of leading bins excluded from the event loss.
+
+    Returns:
+        A dictionary containing averaged held-out loss terms plus batch and window counts.
+    """
     model.eval()
     total_loss = 0
     total_spike = 0
@@ -1130,6 +1472,16 @@ def evaluate_event_windows(model, dataloader, device, pos_weight,
 def evaluate_connectivity(model, neighbor_indices, true_binary, neuron_ids=None):
     """
     Evaluate connectivity prediction from the learned weight matrix.
+
+    Args:
+        model: Trained learned-LIF model.
+        neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+        true_binary: Ground-truth binary connectivity matrix.
+        neuron_ids: Optional subset of postsynaptic neurons to evaluate.
+
+    Returns:
+        A tuple containing the aggregate connectivity metrics dictionary, flattened
+        connectivity scores, flattened labels, and the full learned connectivity matrix.
 
     Uses |W[j,k]| as the connectivity score for each (post j, pre k) pair.
     """
@@ -1212,6 +1564,28 @@ def plot_results(connectivity_results, scores, labels, conn_matrix,
                  train_losses, val_losses, conn_aucs, val_window_results,
                  neuron_positions, connections, neighbor_indices,
                  model, session_name, output_name, output_dir):
+    """Render and save the standard spike-only learned-LIF summary figure.
+
+    Args:
+        connectivity_results: Aggregate connectivity metrics computed from learned weights.
+        scores: Flattened connectivity scores used for thresholding and PR analysis.
+        labels: Flattened ground-truth connectivity labels aligned with `scores`.
+        conn_matrix: Full learned connectivity matrix.
+        train_losses: Per-epoch training loss history.
+        val_losses: Per-epoch validation loss history.
+        conn_aucs: Per-epoch connectivity AUC history.
+        val_window_results: Held-out event-window validation summary.
+        neuron_positions: 2-D neuron coordinates from the simulation session.
+        connections: Ground-truth connection table from the simulation session.
+        neighbor_indices: Candidate presynaptic indices for each postsynaptic neuron.
+        model: Trained learned-LIF model.
+        session_name: Human-readable session name used in figure titles.
+        output_name: Stem used for the saved figure filename.
+        output_dir: Output directory where the figure is written.
+
+    Returns:
+        The path to the saved summary figure.
+    """
 
     n_neurons = len(neuron_positions)
 
@@ -1356,6 +1730,17 @@ def plot_results(connectivity_results, scores, labels, conn_matrix,
 # ============================================================================
 
 def load_session(session_dir, recording_idx=0, dt=1.0):
+    """Load one saved recording and its network metadata from a simulation session.
+
+    Args:
+        session_dir: Session directory containing saved recordings and network structure.
+        recording_idx: Zero-based recording index to load from the session.
+        dt: Bin width in milliseconds used to convert saved burst onset times into bins.
+
+    Returns:
+        A dictionary containing spike times, duration, burst-onset bins, connectivity,
+        neuron positions, cluster assignments, and neuron count for the recording.
+    """
     rec_path = os.path.join(session_dir, f'recording{recording_idx:03d}.npz')
     net_files = glob.glob(os.path.join(session_dir, 'network_*.npz'))
     if not net_files:
@@ -1385,7 +1770,19 @@ def plot_recording_raster_with_exclusions(spike_times, cluster_assignments,
                                           duration_ms, excluded_windows=None,
                                           title='Recording Raster',
                                           output_path=None):
-    """Plot a single-recording raster and shade excluded windows."""
+    """Plot a single-recording raster and shade excluded windows.
+
+    Args:
+        spike_times: Per-neuron spike-time sequences in milliseconds.
+        cluster_assignments: Optional cluster index for each neuron.
+        duration_ms: Recording duration in milliseconds.
+        excluded_windows: Optional exclusion windows in milliseconds.
+        title: Figure title.
+        output_path: Optional file path where the raster should be saved.
+
+    Returns:
+        A ``(fig, ax)`` tuple for the created raster plot.
+    """
     if cluster_assignments is None:
         neuron_ids = list(range(len(spike_times)))
     else:
@@ -1450,6 +1847,48 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
                  burst_merge_gap_ms=150.0,
                  burst_pad_before_ms=100.0,
                  burst_pad_after_ms=250.0):
+    """Train the spike-only learned-LIF connectivity model and export artifacts.
+
+    Args:
+        session_dir: Session directory containing saved simulation recordings.
+        K: Number of candidate presynaptic neurons retained per postsynaptic neuron.
+        recording_idx: Recording index used when fitting only a single recording.
+        n_epochs: Maximum number of training epochs.
+        lr: Optimizer learning rate.
+        batch_size: Event-window batch size.
+        patience: Early-stopping patience measured in epochs.
+        val_fraction: Fraction of data held out for validation.
+        dt: Spike bin size in milliseconds.
+        max_delay: Maximum discrete synaptic delay in bins.
+        l1_lambda: Weight on L1 sparsity regularization for learned weights.
+        pos_weight: Positive-class weighting used in the spike BCE loss.
+        subsample_T: Optional limit on the number of fitted time bins.
+        device: Torch device string; defaults to CUDA when available.
+        output_tag: Optional suffix appended to saved artifact names.
+        pre_context: Number of pre-spike bins included in each event window.
+        post_context: Number of post-spike bins included in each event window.
+        warmup: Number of warmup bins excluded from the event loss.
+        neg_ratio: Number of negative windows sampled per positive window.
+        neg_min_distance: Minimum distance in bins between negative windows and real spikes.
+        use_all_recordings: Whether to concatenate all session recordings before fitting.
+        candidate_mode: Candidate proposal mode, typically spatial or hybrid.
+        candidate_spatial_frac: Spatial fraction reserved in hybrid candidate mode.
+        candidate_min_lag: Minimum causal lag in bins for temporal candidates.
+        candidate_max_lag: Maximum causal lag in bins for temporal candidates.
+        exclude_detected_bursts: Whether to detect and exclude burst windows from fitting.
+        burst_activity_bin_ms: Bin width used for burst detection.
+        burst_smooth_bins: Smoothing width applied to population activity for burst detection.
+        burst_threshold_std: Threshold factor applied to burst detection.
+        burst_min_active_fraction: Minimum active-neuron fraction for a detected burst.
+        burst_min_duration_ms: Minimum duration of a detected burst window.
+        burst_merge_gap_ms: Maximum gap between burst segments before merging.
+        burst_pad_before_ms: Padding added before each excluded burst window.
+        burst_pad_after_ms: Padding added after each excluded burst window.
+
+    Returns:
+        A tuple containing the aggregate connectivity metrics dictionary and the
+        learned full connectivity matrix.
+    """
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -1515,6 +1954,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
         'per_recording_counts': np.zeros(max(0, len(boundaries) - 1), dtype=np.int32),
         'thresholds': np.array([], dtype=np.float32),
     }
+    # Optionally detect burst-dominated periods and remove them from both scoring and training windows.
     if exclude_detected_bursts:
         detected_burst_info = detect_network_burst_windows(
             spike_matrix,
@@ -1530,6 +1970,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
             pad_after_ms=burst_pad_after_ms,
         )
 
+    # Union saved stimulation onsets with detected burst bins into one exclusion mask.
     excluded_bins = combine_excluded_bins(
         saved_burst_onset_bins,
         detected_burst_info['excluded_bins'],
@@ -1554,6 +1995,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
         print(f"  Total excluded bins: {len(excluded_bins)}")
 
     # Neighbors + ground truth
+    # Build temporal candidates on the training recordings only so the validation slice stays untouched.
     candidate_train_boundaries, _ = split_recording_boundaries(boundaries, val_fraction)
     candidate_max_lag = max_delay if candidate_max_lag is None else candidate_max_lag
     neighbor_indices, K_actual, candidate_info = compute_neighbor_indices(
@@ -1604,6 +2046,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
                            "Check spike_matrix has enough spikes and window "
                            "parameters fit the recording length.")
 
+    # Window batches can mix neurons, but each sample still points back to its own learned weight row.
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
@@ -1703,8 +2146,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
           f"threshold={model.threshold.item():.4f}, beta={model.beta.item():.4f}")
 
     # Visualize
-    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'learned_lif_outputs')
+    output_dir = os.path.join(PROJECT_ROOT, 'learned_lif_outputs')
     plot_results(all_results, all_scores, all_labels, conn_matrix,
                  train_losses, val_losses, conn_aucs, val_window_results,
                  positions, connections, neighbor_indices,
@@ -1760,7 +2202,15 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=100, lr=1e-3,
 # ============================================================================
 
 def select_session():
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "LIF data")
+    """Interactively choose a saved session from the default output folder.
+
+    Args:
+        None.
+
+    Returns:
+        The filesystem path of the selected session directory.
+    """
+    data_dir = os.path.join(PROJECT_ROOT, "LIF data")
     sessions = sorted([s for s in glob.glob(os.path.join(data_dir, "*"))
                        if os.path.isdir(s)])
     if not sessions:
@@ -1772,7 +2222,15 @@ def select_session():
     return sessions[0] if choice == '' else sessions[int(choice)]
 
 
-if __name__ == "__main__":
+def build_parser():
+    """Build the CLI parser for the spike-only learned-LIF pipeline.
+
+    Args:
+        None.
+
+    Returns:
+        An ``argparse.ArgumentParser`` configured for the spike-only inference CLI.
+    """
     parser = argparse.ArgumentParser(description='Learned LIF Connectivity')
     parser.add_argument('--session', type=str, default=None)
     parser.add_argument('--output-tag', type=str, default=None,
@@ -1833,7 +2291,22 @@ if __name__ == "__main__":
                         help='Padding before each detected burst window in ms')
     parser.add_argument('--burst-pad-after-ms', type=float, default=250.0,
                         help='Padding after each detected burst window in ms')
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    """Parse CLI arguments and launch the spike-only learned-LIF pipeline.
+
+    Args:
+        argv: Optional CLI argument list. When omitted, arguments are read from
+            ``sys.argv``.
+
+    Returns:
+        None. The function resolves the session and runs the spike-only inference
+        pipeline.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     session_dir = args.session if args.session else select_session()
 
@@ -1862,3 +2335,7 @@ if __name__ == "__main__":
         burst_pad_before_ms=args.burst_pad_before_ms,
         burst_pad_after_ms=args.burst_pad_after_ms,
     )
+
+
+if __name__ == "__main__":
+    main()
