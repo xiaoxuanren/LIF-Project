@@ -640,7 +640,7 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
     """
 
     def __init__(self, n_neurons, K, max_delay=5, threshold_mode='adaptive',
-                 slow_state_mode='none'):
+                 slow_state_mode='none', dale=False, neighbor_indices=None):
         """Initialize the voltage-augmented learned-LIF model parameters.
 
         Args:
@@ -669,6 +669,25 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
             )
 
         self.W = nn.Parameter(torch.zeros(n_neurons, K))
+        self.dale = bool(dale)
+        if self.dale:
+            if neighbor_indices is None:
+                raise ValueError(
+                    'dale=True requires neighbor_indices to map candidate weights '
+                    'to presynaptic neurons.'
+                )
+            neighbor_index_array = np.zeros((n_neurons, K), dtype=np.int64)
+            for post_id in range(n_neurons):
+                pre_ids = np.asarray(neighbor_indices[post_id], dtype=np.int64).ravel()[:K]
+                neighbor_index_array[post_id, :len(pre_ids)] = pre_ids
+            self.presyn_sign_logit = nn.Parameter(torch.zeros(n_neurons))
+            self.register_buffer(
+                'neighbor_index_buffer',
+                torch.as_tensor(neighbor_index_array, dtype=torch.long),
+            )
+        else:
+            self.presyn_sign_logit = None
+            self.neighbor_index_buffer = None
         self.delay_logits = nn.Parameter(torch.zeros(n_neurons, K, max_delay))
         self.bias = nn.Parameter(torch.zeros(n_neurons))
 
@@ -829,7 +848,7 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         B, K, T = pre_spikes.shape
         device = pre_spikes.device
 
-        w = self.W[neuron_ids]
+        w = self.effective_W()[neuron_ids]
         delay_logits = self.delay_logits[neuron_ids]
         delay_weights = F.softmax(delay_logits, dim=-1)
         bias = self.bias[neuron_ids]
@@ -916,6 +935,16 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
             return spike_probs, voltages, w, final_state
         return spike_probs, voltages, w
 
+    def effective_W(self):
+        """Return candidate weights after optional Dale sign tying."""
+        if not self.dale:
+            return self.W
+        assert self.presyn_sign_logit is not None
+        assert self.neighbor_index_buffer is not None
+        presyn_sign = torch.tanh(self.presyn_sign_logit)
+        candidate_sign = presyn_sign[self.neighbor_index_buffer]
+        return candidate_sign * F.softplus(self.W)
+
     def get_connectivity_matrix(self, neighbor_indices):
         """Expand candidate weights into a full postsynaptic-by-presynaptic matrix.
 
@@ -926,7 +955,7 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
             A dense ``[n_neurons, n_neurons]`` connectivity matrix assembled from
             the learned candidate weights.
         """
-        W_np = self.W.detach().cpu().numpy()
+        W_np = self.effective_W().detach().cpu().numpy()
         n = self.n_neurons
         conn_matrix = np.zeros((n, n), dtype=np.float32)
 
@@ -2006,7 +2035,7 @@ def load_single_recording_with_voltage(session_dir, recording_idx=0, dt=1.0,
 def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  batch_size=128, patience=20, val_fraction=0.2, dt=None,
                  max_delay=None, max_delay_ms=10.0, l1_lambda=0.01, pos_weight=5.0,
-                 voltage_lambda=1.0, subsample_T=None, device=None,
+                 dale=False, voltage_lambda=1.0, subsample_T=None, device=None,
                  output_tag=None, pre_context=50, post_context=10,
                  warmup=100, neg_ratio=1.0, neg_min_distance=100,
                  training_mode='event_window', continuous_chunk_len=250,
@@ -2048,6 +2077,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         max_delay: Maximum discrete synaptic delay in bins.
         l1_lambda: Weight on L1 sparsity regularization for learned weights.
         pos_weight: Positive-class weighting used in the spike BCE loss.
+        dale: Whether to tie each presynaptic neuron's outgoing signs in the fitted model.
         voltage_lambda: Weight on the masked subthreshold voltage loss.
         subsample_T: Optional limit on the number of fitted time bins.
         device: Torch device string; defaults to CUDA when available.
@@ -2129,6 +2159,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     print(f'Dt: {dt:g} ms ({dt_source})')
     print(f'Threshold mode: {threshold_mode}')
     print(f'Slow state mode: {slow_state_mode}')
+    print(f'Dale sign constraint: {"on" if dale else "off"}')
     print(f'Connectivity thresholding: {connectivity_threshold_mode}')
     print(f'Device: {device}')
     print(f"{'='*70}")
@@ -2307,15 +2338,18 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         max_delay=max_delay,
         threshold_mode=threshold_mode,
         slow_state_mode=slow_state_mode,
+        dale=dale,
+        neighbor_indices=neighbor_indices,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     membrane_threshold_params = 2 * n_neurons + 4 if model.threshold_mode == 'adaptive' else 4
+    dale_params = n_neurons if model.dale else 0
     slow_params = 0
     if model.uses_slow_adaptation:
         slow_params += n_neurons + 1
     if model.uses_h_current:
         slow_params += n_neurons + 3
-    print(f'  Parameters: {n_params:,} (W: {n_neurons * K_actual:,}, delays: {n_neurons * K_actual * max_delay:,}, bias: {n_neurons:,}, membrane+threshold: {membrane_threshold_params:,}, slow-state: {slow_params:,})')
+    print(f'  Parameters: {n_params:,} (W: {n_neurons * K_actual:,}, delays: {n_neurons * K_actual * max_delay:,}, bias: {n_neurons:,}, membrane+threshold: {membrane_threshold_params:,}, slow-state: {slow_params:,}, dale-sign: {dale_params:,})')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -2511,6 +2545,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         'candidate_info': candidate_info,
         'threshold_mode': model.threshold_mode,
         'slow_state_mode': model.slow_state_mode,
+        'dale': bool(model.dale),
         'connectivity_threshold_mode': connectivity_threshold_mode,
         'neighbor_indices': neighbor_indices,
         'connectivity_matrix': conn_matrix,
@@ -2607,6 +2642,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         neuron_positions=positions,
         true_weights=true_weights,
         slow_state_mode=model.slow_state_mode,
+        dale=np.array(bool(model.dale)),
         per_neuron_ids=per_neuron_ids,
         per_neuron_thresholds=per_neuron_thresholds,
         per_neuron_selected_edges=per_neuron_selected_edges,
@@ -2667,6 +2703,8 @@ def build_parser():
     parser.add_argument('--max-delay-ms', type=float, default=10.0,
                         help='Synaptic-latency window in MILLISECONDS. Converted to bins '
                              'via dt so it stays physically meaningful at any resolution.')
+    parser.add_argument('--dale', action='store_true',
+                        help="Enforce Dale's law in the fitted model by tying each presynaptic neuron's outgoing sign across candidate targets")
     parser.add_argument('--l1', type=float, default=0.01)
     parser.add_argument('--pos-weight', type=float, default=5.0)
     parser.add_argument('--voltage-lambda', type=float, default=1.0,
@@ -2764,6 +2802,7 @@ def main(argv=None):
         n_epochs=args.epochs, lr=args.lr, batch_size=args.batch,
         patience=args.patience, dt=args.dt, max_delay=args.max_delay,
         max_delay_ms=args.max_delay_ms,
+        dale=args.dale,
         l1_lambda=args.l1, pos_weight=args.pos_weight,
         voltage_lambda=args.voltage_lambda,
         val_fraction=args.val_fraction, output_tag=args.output_tag,
