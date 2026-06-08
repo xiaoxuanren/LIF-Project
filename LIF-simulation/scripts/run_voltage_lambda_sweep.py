@@ -499,7 +499,7 @@ def main():
     parser.add_argument('--pos-weight', type=float, default=5.0)
     parser.add_argument('--dt', type=float, default=None,
                         help='Optional spike/voltage bin width override in ms. Defaults to the session metadata value.')
-    parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'])
+    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'])
     parser.add_argument('--candidate-mode', type=str, default='hybrid', choices=['spatial', 'hybrid'])
     parser.add_argument('--candidate-spatial-frac', type=float, default=0.8)
     parser.add_argument('--candidate-min-lag', type=int, default=1)
