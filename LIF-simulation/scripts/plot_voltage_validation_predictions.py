@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -498,7 +497,6 @@ def plot_global_spike_raster(output_path, checkpoint, context, timeline_predicti
                              spike_threshold, spike_threshold_source,
                              threshold_info, onset_tolerance_ms):
     actual_spikes = timeline_predictions['actual_spikes']
-    predicted_spike_calls = timeline_predictions['predicted_spike_calls']
     boundaries = np.asarray(timeline_predictions['boundaries'], dtype=np.int32)
     matched_predicted_mask = timeline_predictions['matched_predicted_mask']
     unmatched_predicted_mask = timeline_predictions['unmatched_predicted_mask']

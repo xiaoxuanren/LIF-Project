@@ -15,7 +15,6 @@ def find_event_windows(spike_matrix, neuron_id, pre_context=50, post_context=10,
         rng = np.random.RandomState(42 + int(neuron_id))
 
     total_bins = spike_matrix.shape[1]
-    window_len = warmup + pre_context + post_context
 
     if boundaries is None:
         boundaries = [0, total_bins]
@@ -46,7 +45,6 @@ def find_event_windows(spike_matrix, neuron_id, pre_context=50, post_context=10,
     neg_windows = []
 
     if n_neg > 0 and valid_ranges:
-        spike_set = set(post_spikes.tolist())
         attempts = 0
         max_attempts = n_neg * 200
 

@@ -31,10 +31,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from .connectivity_metrics import (
-    compute_binary_classification_metrics,
     evaluate_connectivity as shared_evaluate_connectivity,
-    flatten_candidate_scores,
-    select_connectivity_threshold,
 )
 from .event_windows import (
     EventWindowDataset as shared_EventWindowDataset,
@@ -70,8 +67,6 @@ from .burst_exclusion import (
 from .shared_data import (
     spike_times_to_binary,
     build_ground_truth,
-    normalize_recording_boundaries,
-    build_segmentwise_circular_shift_surrogates,
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

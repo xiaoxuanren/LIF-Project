@@ -130,7 +130,6 @@ def main():
 
     print("\n=== Why are non-edges falsely called? (FP vs TN among true non-edges) ===")
     print(f"{'feature':28s} {'FP':>10s} {'TN':>10s} {'enrich(FP/TN)':>14s}")
-    rows = []
     # shared input
     fp_share = shared[FP].mean() if FP.sum() else float("nan")
     tn_share = shared[TN].mean() if TN.sum() else float("nan")

@@ -2408,7 +2408,6 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     train_history = training_results['train_history']
     val_history = training_results['val_history']
     conn_aucs = training_results['conn_aucs']
-    best_val_loss = training_results['best_val_loss']
     val_window_results = training_results['val_window_results']
 
     surrogate_score_sets = None
