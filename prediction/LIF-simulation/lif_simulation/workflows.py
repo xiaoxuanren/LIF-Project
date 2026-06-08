@@ -1,0 +1,294 @@
+import json
+import os
+from datetime import datetime
+
+from .analysis import report_network_statistics
+from .models import NetworkWeightParameters
+from .network import create_clustered_network
+from .session_io import save_network_structure, save_recording_data
+from .simulation import simulate_network
+from .stimulation import create_periodic_cluster_stimulation
+from .voltage_storage import ChunkedHdf5VoltageRecorder
+
+
+def sequential_simulation_individual_saves(
+    n_recordings=15,
+    recording_duration=60000,
+    num_clusters=20,
+    neurons_per_cluster_range=(12, 18),
+    inhibitory_probability=0.2,
+    within_cluster_prob=0.5,
+    between_cluster_prob=0.15,
+    target_freq=10,
+    save_dir="LIF data",
+    dt=0.1,
+    record_voltage=True,
+    voltage_sample_rate=1.0,
+    voltage_storage_backend="hdf5_external",
+    voltage_chunk_samples=4096,
+    space_size=15,
+    max_connection_distance=8.0,
+    use_h_current=True,
+    burst_interval=7000,
+    cluster_fraction=0.7,
+    neurons_per_cluster=6,
+    stim_amplitude_range=(2.0, 3.5),
+    stim_duration_range=(10, 30),
+    burst_interval_jitter=1500,
+    hub_fraction=0.1,
+    hub_between_prob=0.4,
+    hub_weight_scale=1.5,
+    hub_reciprocal_factor=2.0,
+):
+    """Run a multi-recording simulation session and save each trial to disk.
+
+    Args:
+        n_recordings: Number of recordings to generate from the same network.
+        recording_duration: Duration of each recording in milliseconds.
+        num_clusters: Number of neuronal clusters to generate.
+        neurons_per_cluster_range: Inclusive range of neurons sampled per cluster.
+        inhibitory_probability: Fraction of neurons designated inhibitory.
+        within_cluster_prob: Base connection probability within the same cluster.
+        between_cluster_prob: Base connection probability between clusters.
+        target_freq: Resampling frequency stored for spike-based analysis outputs.
+        save_dir: Root directory used for the session bundle.
+        dt: Simulation step in milliseconds.
+        record_voltage: Whether to save membrane voltage traces.
+        voltage_sample_rate: Legacy voltage sampling interval request.
+        voltage_storage_backend: Storage backend used for saved voltage traces.
+        voltage_chunk_samples: Number of timesteps buffered per HDF5 chunk flush.
+        space_size: Side length of the 2-D spatial layout.
+        max_connection_distance: Maximum allowed connection distance.
+        use_h_current: Whether to keep the slow h-current update path enabled.
+        burst_interval: Nominal interval between stimulation bursts in milliseconds.
+        cluster_fraction: Fraction of clusters stimulated during each burst.
+        neurons_per_cluster: Number of neurons stimulated in each selected cluster.
+        stim_amplitude_range: Inclusive stimulus amplitude range in nA.
+        stim_duration_range: Inclusive stimulus duration range in milliseconds.
+        burst_interval_jitter: Random jitter applied to each burst onset in milliseconds.
+        hub_fraction: Fraction of neurons per cluster designated as hubs.
+        hub_between_prob: Base inter-cluster connection probability for hub projections.
+        hub_weight_scale: Multiplicative weight boost applied to hub-originating edges.
+        hub_reciprocal_factor: Probability boost used for hub-to-hub projections.
+
+    Returns:
+        A session metadata dictionary describing the generated network and recordings.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = os.path.join(save_dir, timestamp)
+    os.makedirs(session_dir, exist_ok=True)
+
+    stimulation_enabled = (
+        cluster_fraction > 0
+        and neurons_per_cluster > 0
+        and burst_interval > 0
+        and burst_interval <= recording_duration
+    )
+    mode_label = "stimulus_driven_bursting" if stimulation_enabled else "spontaneous_firing"
+    saved_voltage_dt = float(dt) if record_voltage else None
+
+    print("\n" + "=" * 70)
+    print(f"STARTING SEQUENTIAL SIMULATION SESSION: {timestamp}")
+    print("=" * 70)
+    print(f"Mode: {mode_label}")
+    print("Synapse model: conductance-based with legacy weight scaling")
+    print(f"H-current enabled: {use_h_current}")
+    print(f"Number of recordings: {n_recordings}")
+    print(f"Recording duration: {recording_duration / 1000:.0f} seconds")
+    print(f"Save directory: {session_dir}")
+    print(f"Record voltage: {record_voltage}")
+    if record_voltage:
+        print(f"Saved voltage resolution: raw full-dt membrane voltage at {saved_voltage_dt:.4f} ms")
+        if voltage_storage_backend == "hdf5_external":
+            print(f"Voltage storage backend: chunked external HDF5 ({int(voltage_chunk_samples)} samples per flush)")
+        else:
+            print(f"Voltage storage backend: {voltage_storage_backend}")
+        if abs(float(voltage_sample_rate) - saved_voltage_dt) > 1e-12:
+            print(
+                f"Requested voltage_sample_rate={float(voltage_sample_rate):.4f} ms is ignored for saved traces"
+            )
+    print(f"Space size: {space_size}")
+    print(f"Max connection distance: {max_connection_distance}")
+    print(f"Target resampling frequency: {target_freq} Hz")
+    if stimulation_enabled:
+        print(f"Burst interval: {burst_interval} ms ({1000 / burst_interval:.2f} Hz) +/- {burst_interval_jitter} ms")
+        print(f"Cluster fraction: {cluster_fraction * 100:.0f}%")
+        print(f"Neurons per cluster: {neurons_per_cluster}")
+    else:
+        print("Stimulation: disabled")
+    print(f"Hub fraction: {hub_fraction * 100:.0f}% | Hub between prob: {hub_between_prob}")
+    print(f"Hub weight scale: {hub_weight_scale}x | Hub reciprocal factor: {hub_reciprocal_factor}x")
+    print("=" * 70 + "\n")
+
+    print("Creating network...")
+    weight_params = NetworkWeightParameters()
+    neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
+        num_clusters=num_clusters,
+        neurons_per_cluster_range=neurons_per_cluster_range,
+        inhibitory_probability=inhibitory_probability,
+        within_cluster_prob=within_cluster_prob,
+        between_cluster_prob=between_cluster_prob,
+        max_connection_distance=max_connection_distance,
+        weight_params=weight_params,
+        space_size=space_size,
+        hub_fraction=hub_fraction,
+        hub_between_prob=hub_between_prob,
+        hub_weight_scale=hub_weight_scale,
+        hub_reciprocal_factor=hub_reciprocal_factor,
+        use_h_current=use_h_current,
+    )
+    print("Background presynaptic input: DISABLED")
+
+    network_file = save_network_structure(
+        connections,
+        neuron_positions,
+        cluster_info,
+        weight_params,
+        timestamp,
+        save_dir,
+    )
+
+    session_metadata = {
+        "timestamp": timestamp,
+        "session_dir": session_dir,
+        "n_recordings": n_recordings,
+        "recording_duration": recording_duration,
+        "num_clusters": num_clusters,
+        "num_neurons": len(neurons),
+        "num_connections": len(connections),
+        "target_freq": target_freq,
+        "dt": dt,
+        "record_voltage": record_voltage,
+        "voltage_sample_rate": saved_voltage_dt if record_voltage else None,
+        "requested_voltage_sample_rate": float(voltage_sample_rate) if record_voltage else None,
+        "voltage_trace_mode": "raw_full_dt" if record_voltage else None,
+        "voltage_storage_backend": voltage_storage_backend if record_voltage else None,
+        "voltage_chunk_samples": int(voltage_chunk_samples) if record_voltage else None,
+        "space_size": space_size,
+        "max_connection_distance": max_connection_distance,
+        "network_file": network_file,
+        "mode": mode_label,
+        "stimulation_enabled": stimulation_enabled,
+        "background_input": False,
+        "burst_interval": burst_interval,
+        "burst_interval_jitter": burst_interval_jitter,
+        "cluster_fraction": cluster_fraction,
+        "neurons_per_cluster": neurons_per_cluster,
+        "stim_amplitude": stim_amplitude_range,
+        "stim_duration": stim_duration_range,
+        "hub_fraction": hub_fraction,
+        "hub_between_prob": hub_between_prob,
+        "hub_weight_scale": hub_weight_scale,
+        "hub_reciprocal_factor": hub_reciprocal_factor,
+        "n_hub_neurons": len(cluster_info.get("hub_neuron_ids", [])),
+        "n_hub_connections": cluster_info.get("n_hub_connections", 0),
+        "synapse_model": "conductance-based with legacy weight scaling",
+        "use_h_current": bool(use_h_current),
+        "h_current_mode": "enabled" if use_h_current else "disabled_skip_update_path",
+        "recordings": [],
+    }
+
+    for rec_idx in range(n_recordings):
+        print(f"\n{'=' * 70}")
+        print(f"RECORDING {rec_idx + 1} / {n_recordings}")
+        print(f"{'=' * 70}")
+
+        try:
+            for neuron in neurons:
+                neuron.reset_state()
+            for syn in synapses:
+                syn.g_syn = 0.0
+                syn.pending_spikes = []
+
+            voltage_recorder = None
+            voltage_sidecar_path = None
+            if record_voltage:
+                if voltage_storage_backend == "hdf5_external":
+                    n_voltage_samples = int(recording_duration / dt)
+                    voltage_sidecar_path = os.path.join(session_dir, f"recording{rec_idx:03d}_voltage.h5")
+                    voltage_recorder = ChunkedHdf5VoltageRecorder(
+                        voltage_sidecar_path,
+                        n_neurons=len(neurons),
+                        n_samples=n_voltage_samples,
+                        sample_rate_ms=dt,
+                        simulation_dt_ms=dt,
+                        chunk_samples=voltage_chunk_samples,
+                    )
+                elif voltage_storage_backend != "inline_npz":
+                    raise ValueError(f"Unsupported voltage_storage_backend: {voltage_storage_backend}")
+
+            stimulation_events, burst_onset_times = create_periodic_cluster_stimulation(
+                neurons,
+                cluster_info,
+                burst_interval=burst_interval,
+                cluster_fraction=cluster_fraction,
+                neurons_per_cluster=neurons_per_cluster,
+                stim_amplitude_range=stim_amplitude_range,
+                stim_duration_range=stim_duration_range,
+                simulation_duration=recording_duration,
+                burst_interval_jitter=burst_interval_jitter,
+            )
+
+            spike_data, voltage_data = simulate_network(
+                neurons,
+                synapses,
+                stimulation_events,
+                dt=dt,
+                duration=recording_duration,
+                record_voltage=record_voltage,
+                voltage_sample_rate=voltage_sample_rate,
+                save_raw_voltage=True,
+                voltage_recorder=voltage_recorder,
+            )
+
+            report_network_statistics(spike_data, neurons, connections, recording_duration)
+            recording_file = save_recording_data(
+                spike_data,
+                voltage_data,
+                cluster_info,
+                rec_idx,
+                timestamp,
+                save_dir,
+                target_freq,
+                recording_duration,
+                burst_onset_times=burst_onset_times,
+            )
+
+            session_metadata["recordings"].append(
+                {
+                    "index": rec_idx,
+                    "file": recording_file,
+                    "success": True,
+                    "num_spikes": sum(len(spikes) for spikes in spike_data.values()),
+                }
+            )
+            print(f"Recording {rec_idx + 1} completed successfully!")
+        except Exception as exc:
+            if 'voltage_recorder' in locals() and voltage_recorder is not None:
+                voltage_recorder.close()
+            if 'voltage_sidecar_path' in locals() and voltage_sidecar_path and os.path.exists(voltage_sidecar_path):
+                os.remove(voltage_sidecar_path)
+            print(f"ERROR in recording {rec_idx + 1}: {str(exc)}")
+            import traceback
+
+            traceback.print_exc()
+            session_metadata["recordings"].append(
+                {
+                    "index": rec_idx,
+                    "file": None,
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+
+    metadata_file = os.path.join(session_dir, "session_metadata.json")
+    with open(metadata_file, "w", encoding="utf-8") as handle:
+        json.dump(session_metadata, handle, indent=2)
+
+    print(f"\n{'=' * 70}")
+    print("SESSION COMPLETE!")
+    print(f"All files saved to: {session_dir}")
+    print(f"Session metadata: {metadata_file}")
+    print(f"{'=' * 70}\n")
+    return session_metadata

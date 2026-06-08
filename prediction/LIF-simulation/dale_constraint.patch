@@ -1,0 +1,114 @@
+diff --git a/LIF-simulation/lif_inference/voltage_augmented_learned_lif_connectivity.py b/LIF-simulation/lif_inference/voltage_augmented_learned_lif_connectivity.py
+index 882f1cf..74ef112 100644
+--- a/LIF-simulation/lif_inference/voltage_augmented_learned_lif_connectivity.py
++++ b/LIF-simulation/lif_inference/voltage_augmented_learned_lif_connectivity.py
+@@ -640,7 +640,7 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
+     """
+
+     def __init__(self, n_neurons, K, max_delay=5, threshold_mode='adaptive',
+-                 slow_state_mode='none'):
++                 slow_state_mode='none', dale=False, neighbor_indices=None):
+         """Initialize the voltage-augmented learned-LIF model parameters.
+
+         Args:
+@@ -669,6 +669,25 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
+             )
+
+         self.W = nn.Parameter(torch.zeros(n_neurons, K))
++
++        # Dale's law: tie the SIGN of every outgoing synapse to its presynaptic
++        # neuron, so a neuron is globally excitatory or inhibitory (it cannot be
++        # +0.5 onto one target and -0.3 onto another). Magnitude stays per-edge.
++        self.dale = bool(dale)
++        if self.dale:
++            self.presyn_sign_logit = nn.Parameter(torch.zeros(n_neurons))
++            if neighbor_indices is None:
++                raise ValueError(
++                    'dale=True requires neighbor_indices to map each candidate '
++                    'weight W[j, k] to its presynaptic neuron.'
++                )
++            nbr = np.zeros((n_neurons, K), dtype=np.int64)
++            for j in range(n_neurons):
++                ids = np.asarray(neighbor_indices[j]).ravel()[:K]
++                nbr[j, :len(ids)] = ids
++            self.register_buffer('neighbor_index_buffer', torch.as_tensor(nbr, dtype=torch.long))
++        else:
++            self.presyn_sign_logit = None
+         self.delay_logits = nn.Parameter(torch.zeros(n_neurons, K, max_delay))
+         self.bias = nn.Parameter(torch.zeros(n_neurons))
+
+@@ -829,7 +848,7 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
+         B, K, T = pre_spikes.shape
+         device = pre_spikes.device
+
+-        w = self.W[neuron_ids]
++        w = self.effective_W()[neuron_ids]
+         delay_logits = self.delay_logits[neuron_ids]
+         delay_weights = F.softmax(delay_logits, dim=-1)
+         bias = self.bias[neuron_ids]
+@@ -916,6 +935,21 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
+             return spike_probs, voltages, w, final_state
+         return spike_probs, voltages, w
+
++    def effective_W(self):
++        """Return candidate weights [n_neurons, K] after any Dale sign tying.
++
++        With ``dale=False`` this is the raw ``W``. With ``dale=True`` every edge
++        is ``sign[presynaptic] * softplus(magnitude)``: the magnitude is per-edge,
++        but the sign is shared across all of a presynaptic neuron's targets, so
++        Dale's law holds exactly (no neuron is excitatory onto some targets and
++        inhibitory onto others).
++        """
++        if not self.dale:
++            return self.W
++        sign = torch.tanh(self.presyn_sign_logit)        # [n_neurons], tied per presynaptic neuron
++        sign_jk = sign[self.neighbor_index_buffer]       # [n_neurons, K]
++        return sign_jk * F.softplus(self.W)
++
+     def get_connectivity_matrix(self, neighbor_indices):
+         """Expand candidate weights into a full postsynaptic-by-presynaptic matrix.
+
+@@ -926,7 +960,7 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
+             A dense ``[n_neurons, n_neurons]`` connectivity matrix assembled from
+             the learned candidate weights.
+         """
+-        W_np = self.W.detach().cpu().numpy()
++        W_np = self.effective_W().detach().cpu().numpy()
+         n = self.n_neurons
+         conn_matrix = np.zeros((n, n), dtype=np.float32)
+
+@@ -2006,6 +2040,7 @@ def load_single_recording_with_voltage(session_dir, recording_idx=0, dt=1.0,
+ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
+                  batch_size=128, patience=20, val_fraction=0.2, dt=None,
+                  max_delay=None, max_delay_ms=10.0, l1_lambda=0.01, pos_weight=5.0,
++                 dale=False,
+                  voltage_lambda=1.0, subsample_T=None, device=None,
+                  output_tag=None, pre_context=50, post_context=10,
+                  warmup=100, neg_ratio=1.0, neg_min_distance=100,
+@@ -2307,6 +2342,8 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
+         max_delay=max_delay,
+         threshold_mode=threshold_mode,
+         slow_state_mode=slow_state_mode,
++        dale=dale,
++        neighbor_indices=neighbor_indices,
+     ).to(device)
+     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+     membrane_threshold_params = 2 * n_neurons + 4 if model.threshold_mode == 'adaptive' else 4
+@@ -2667,6 +2704,9 @@ def build_parser():
+     parser.add_argument('--max-delay-ms', type=float, default=10.0,
+                         help='Synaptic-latency window in MILLISECONDS. Converted to bins '
+                              'via dt so it stays physically meaningful at any resolution.')
++    parser.add_argument('--dale', action='store_true',
++                        help="Enforce Dale's law: tie each presynaptic neuron's outgoing "
++                             'sign across all its targets (excitatory or inhibitory globally).')
+     parser.add_argument('--l1', type=float, default=0.01)
+     parser.add_argument('--pos-weight', type=float, default=5.0)
+     parser.add_argument('--voltage-lambda', type=float, default=1.0,
+@@ -2764,6 +2804,7 @@ def main(argv=None):
+         n_epochs=args.epochs, lr=args.lr, batch_size=args.batch,
+         patience=args.patience, dt=args.dt, max_delay=args.max_delay,
+         max_delay_ms=args.max_delay_ms,
++        dale=args.dale,
+         l1_lambda=args.l1, pos_weight=args.pos_weight,
+         voltage_lambda=args.voltage_lambda,
+         val_fraction=args.val_fraction, output_tag=args.output_tag,
