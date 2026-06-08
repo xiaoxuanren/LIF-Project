@@ -21,33 +21,6 @@ def flatten_candidate_scores(conn_matrix, neighbor_indices, neuron_ids=None,
     return np.concatenate(all_scores).astype(np.float32, copy=False)
 
 
-def flatten_candidate_score_table(conn_matrix, neighbor_indices, neuron_ids=None,
-                                  absolute=True):
-    """Flatten candidate scores with aligned postsynaptic and presynaptic ids."""
-    if neuron_ids is None:
-        neuron_ids = np.arange(conn_matrix.shape[0])
-
-    all_scores = []
-    all_post_ids = []
-    all_pre_ids = []
-    for neuron_id in np.asarray(neuron_ids, dtype=np.int32):
-        pre_ids = np.asarray(neighbor_indices[neuron_id], dtype=np.int32)
-        row_scores = np.asarray(conn_matrix[neuron_id, pre_ids])
-        row_scores = np.abs(row_scores) if absolute else row_scores
-        all_scores.append(row_scores)
-        all_post_ids.append(np.full(len(pre_ids), int(neuron_id), dtype=np.int32))
-        all_pre_ids.append(pre_ids)
-
-    if not all_scores:
-        empty = np.empty(0, dtype=np.float32)
-        return empty, empty.astype(np.int32), empty.astype(np.int32)
-    return (
-        np.concatenate(all_scores).astype(np.float32, copy=False),
-        np.concatenate(all_post_ids).astype(np.int32, copy=False),
-        np.concatenate(all_pre_ids).astype(np.int32, copy=False),
-    )
-
-
 def compute_binary_classification_metrics(labels, predicted):
     """Compute confusion counts plus precision, recall, and F1."""
     labels = np.asarray(labels).astype(np.int32, copy=False)

@@ -138,19 +138,6 @@ def spike_times_to_sample_bins(spike_times, sample_rate_ms, n_samples):
     return np.unique(bins)
 
 
-def ms_to_bins(time_ms, sample_rate_ms):
-    """Convert a duration in milliseconds into at least one sample bin.
-
-    Args:
-        time_ms: Duration in milliseconds.
-        sample_rate_ms: Sample spacing in milliseconds.
-
-    Returns:
-        The nearest positive integer number of sample bins.
-    """
-    return max(1, int(round(float(time_ms) / float(sample_rate_ms))))
-
-
 def preprocess_voltage_recording(voltage_traces, spike_times, sample_rate_ms,
                                  mask_pre_ms=0.0, mask_post_ms=2.0,
                                  peak_threshold_mv=15.0):
