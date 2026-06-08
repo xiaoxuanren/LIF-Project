@@ -1,6 +1,6 @@
 # LIF Simulation Data Structure
 
-This document describes all files saved by the LIF network simulation pipeline and the GNN preprocessing notebook.
+This document describes all files saved by the LIF network simulation pipeline.
 
 ---
 
@@ -15,9 +15,7 @@ LIF data/
     ├── recording001.npz                  # (n_recordings per session)
   ├── recording001_voltage.h5           # Optional sidecar per recording when using external HDF5 voltage storage
     ├── ...
-    ├── recording_combined.npz            # All recordings merged (created by process_existing_for_gnn.ipynb)
-    ├── session_metadata.json             # Session config & recording manifest
-    └── session_gnn_metadata.json         # Simplified metadata for GNN pipeline
+    └── session_metadata.json             # Session config & recording manifest
 ```
 
 ---
@@ -59,11 +57,11 @@ Saved per recording by `save_recording_data()`.
 
 | Key | Type | Shape | Description |
 |-----|------|-------|-------------|
-| `resampled_spikes` | ndarray (int) | `(n_neurons, n_time_points)` | Binary spike matrix at `target_freq` Hz (default 20 Hz → 50 ms bins) |
+| `resampled_spikes` | ndarray (int) | `(n_neurons, n_time_points)` | Binary spike matrix at `target_freq` Hz (default 10 Hz → 100 ms bins) |
 | `resampled_time_points` | ndarray (float64) | `(n_time_points,)` | Time values for each resampled bin (ms) |
 | `resampled_cluster_assignments` | ndarray (int) | `(n_neurons,)` | Cluster ID for each neuron |
-| `resampling_frequency` | int | scalar | Target resampling frequency in Hz (default 20) |
-| `resampling_interval_ms` | float | scalar | Bin width in ms (default 50.0) |
+| `resampling_frequency` | int | scalar | Target resampling frequency in Hz (default 10) |
+| `resampling_interval_ms` | float | scalar | Bin width in ms (default 100.0) |
 | `resampled_spike_positions` | ndarray (int) | `(n_spikes, 2)` | `[neuron_id, time_bin_idx]` pairs where resampled spikes occurred |
 
 ### Voltage Traces (optional, when `record_voltage=True`)
@@ -98,18 +96,21 @@ When `voltage_storage_backend = hdf5_external`, the heavy full-dt voltage matrix
 
 ---
 
-## 3. `recording_combined.npz` — Combined Recording for GNN
+## 3. Combined Session View (in memory)
 
-Created by `process_existing_for_gnn.ipynb`. All individual recordings are merged with time offsets (`spike_time + rec_index × recording_duration`). Voltage traces are concatenated along the time axis.
+Produced in memory by `combine_session_data()` (exported from `lif_simulation`, defined in `lif_simulation/session_io.py`). All loaded recordings are merged with cumulative time offsets applied to spike times (`spike_time + cumulative_recording_offset`); resampled rasters and voltage traces are concatenated along the time axis. This function returns a dict and does **not** write a file — the legacy `recording_combined.npz` and its GNN preprocessing notebook are not part of this snapshot.
 
 | Key | Type | Shape | Description |
 |-----|------|-------|-------------|
-| `spike_times` | ndarray (object) | `(n_neurons,)` | Each element is a sorted 1D array of spike times (ms) across all recordings with time offsets applied |
-| `duration_ms` | int | scalar | Total combined duration in ms (`n_recordings × recording_duration`) |
-| `n_neurons` | int | scalar | Number of neurons |
-| `voltage_traces` | ndarray (float32) | `(n_neurons, total_voltage_samples)` | Concatenated raw membrane voltage across all recordings *(included if source recordings have voltage data)* |
-| `voltage_times` | ndarray (float32) | `(total_voltage_samples,)` | Time points for concatenated voltage *(optional)* |
-| `voltage_sample_rate` | float | scalar | Actual stored voltage step in ms *(optional)* |
+| `spike_times` | list of list | `(n_neurons,)` | Per-neuron spike times (ms) across all recordings with time offsets applied |
+| `resampled_spikes` | ndarray (int) | `(n_neurons, total_time_points)` | Concatenated resampled binary spike matrix |
+| `resampled_time_points` | ndarray (float64) | `(total_time_points,)` | Concatenated bin time axis with offsets applied |
+| `n_recordings` | int | scalar | Number of merged recordings |
+| `recording_durations` | ndarray (float64) | `(n_recordings,)` | Per-recording durations in ms |
+| `total_duration` | float | scalar | Total combined duration in ms |
+| `voltage_traces` | ndarray (float32) | `(n_neurons, total_voltage_samples)` | Concatenated raw membrane voltage *(included only if source recordings have voltage data)* |
+| `voltage_times` | ndarray (float64) | `(total_voltage_samples,)` | Concatenated voltage time axis *(optional)* |
+| `voltage_sample_rate` | float | scalar | Stored voltage step in ms *(optional)* |
 
 ---
 
@@ -126,7 +127,7 @@ Saved by `sequential_simulation_individual_saves()`. Contains all simulation par
   "num_clusters": 20,
   "num_neurons": 299,
   "num_connections": 2808,
-  "target_freq": 20,
+  "target_freq": 10,
   "dt": 0.1,
   "record_voltage": true,
   "voltage_sample_rate": 0.1,
@@ -185,34 +186,6 @@ Saved by `sequential_simulation_individual_saves()`. Contains all simulation par
 
 ---
 
-## 5. `session_gnn_metadata.json` — GNN Pipeline Metadata
-
-Created by `process_existing_for_gnn.ipynb`. Points to the combined recording file.
-
-```json
-{
-  "timestamp": "20260223_130621",
-  "n_recordings_combined": 5,
-  "recording_duration": 300000,
-  "num_clusters": 20,
-  "num_neurons": 299,
-  "num_connections": 2808,
-  "network_file": "LIF data/20260223_130621/network_20260223_130621.npz",
-  "recordings": [
-    {
-      "index": 0,
-      "file": "LIF data/20260223_130621/recording_combined.npz",
-      "success": true,
-      "num_spikes": 41392
-    }
-  ]
-}
-```
-
-**Key difference from `session_metadata.json`:** The GNN metadata wraps all recordings into a single entry pointing to `recording_combined.npz`, with `recording_duration` set to the **total combined time** (not per-recording). Paths use forward slashes for cross-platform compatibility.
-
----
-
 ## Typical Dimensions
 
 | Quantity | Typical Value |
@@ -223,5 +196,5 @@ Created by `process_existing_for_gnn.ipynb`. Points to the combined recording fi
 | Hub neurons | ~20 (~7%) |
 | Recordings per session | 1–20 |
 | Per-recording duration | 60,000 ms (60 s) |
-| Resampled time points per recording | 1,200 (at 20 Hz) |
+| Resampled time points per recording | 600 (at 10 Hz, 100 ms bins) |
 | Voltage samples per recording | 600,000 (at 0.1 ms rate) |

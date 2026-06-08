@@ -1,8 +1,10 @@
 # LIF Network Simulation — Code Analysis
 
+> **Archival note:** This document analyzes the original **current-based** predecessor notebook (`LIF_network_simulation.ipynb`), which is **not part of this repository snapshot**. It is retained for historical context only. The current, supported surface is the conductance-based notebook `LIF_network_simulation_network_burst_conductance.ipynb` plus the `lif_simulation/` package; parameters described below (exponential current-based synapses, `v_rest = -62 mV`, etc.) differ from the current conductance model.
+
 ## File
 
-`LIF_network_simulation.ipynb` — Jupyter notebook, 29 cells (Parts 0–11).
+`LIF_network_simulation.ipynb` — Jupyter notebook, 29 cells (Parts 0–11). *(Original current-based notebook; not present in this snapshot — see archival note above.)*
 
 ## Purpose
 

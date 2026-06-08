@@ -771,7 +771,8 @@ In the current packaged implementation, `run_pipeline()` also stores the voltage
 | `--lr` | 0.001 | Adam learning rate |
 | `--batch` | 128 | Event windows per batch |
 | `--patience` | 20 | Early-stopping patience |
-| `--max-delay` | 8 | Number of discrete delay bins per candidate synapse |
+| `--max-delay` | None (derived) | Optional explicit delay-bin count; when omitted, derived from `--max-delay-ms` and `dt` |
+| `--max-delay-ms` | 10.0 | Synaptic-latency window in ms, converted to delay bins via `dt` |
 | `--l1` | 0.01 | L1 sparsity penalty |
 | `--pos-weight` | 5.0 | Positive-class weight in BCE spike loss |
 | `--voltage-lambda` | 1.0 | Weight on masked voltage loss |
@@ -838,18 +839,18 @@ python -m scripts.run_voltage_lambda_sweep --session "LIF data/<timestamp>" --la
 | `--l1` | 0.01 | L1 sparsity penalty |
 | `--pos-weight` | 5.0 | Positive-class weight |
 | `--dt` | inferred from session metadata | Optional bin width override in ms |
-| `--device` | `cuda` | Compute device |
+| `--device` | `cpu` | Compute device: `cpu` or `cuda` |
 | `--candidate-mode` | `hybrid` | Candidate proposal mode |
 | `--candidate-spatial-frac` | 0.8 | Fraction of K reserved for spatial neighbors |
 | `--candidate-min-lag` | 1 | Minimum causal lag in bins |
 | `--candidate-max-lag` | None | Maximum causal lag in bins |
 | `--pre-context` | 50 | Event-window presynaptic history |
 | `--post-context` | 10 | Event-window post-spike context |
-| `--warmup` | 30 | Warmup bins before loss starts |
+| `--warmup` | 100 | Warmup bins before loss starts |
 | `--neg-ratio` | 1.0 | Negative windows per positive window |
 | `--neg-min-dist` | 100 | Minimum distance from any postsynaptic spike for negatives |
 | `--val-fraction` | 0.2 | Validation fraction |
-| `--mask-pre-ms` | 1.0 | Mask duration before peaks |
+| `--mask-pre-ms` | 0.0 | Mask duration before peaks |
 | `--mask-post-ms` | 2.0 | Mask duration after peaks |
 | `--peak-threshold-mv` | 15.0 | Peak masking threshold |
 
