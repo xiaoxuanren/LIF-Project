@@ -3,8 +3,49 @@ import random
 import numpy as np
 
 from .models import LIFNeuron, NetworkWeightParameters
-from .network import create_clustered_network
+from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
+from .analysis import segment_states
 from .simulation import simulate_network
+
+
+def _count_spikes_in_windows(spike_data, windows):
+    """Count spikes whose times fall inside any supplied time window."""
+    total = 0
+    for spike_times in spike_data.values():
+        if len(spike_times) == 0:
+            continue
+        spike_times_array = np.asarray(spike_times, dtype=float)
+        for start_ms, end_ms in windows:
+            total += int(np.sum((spike_times_array >= start_ms) & (spike_times_array < end_ms)))
+    return total
+
+
+def _active_interburst_bin_summary(spike_data, n_neurons, interburst_windows, bin_ms):
+    """Summarize non-empty population bins restricted to inter-burst windows."""
+    active_bins = 0
+    total_bins = 0
+    for start_ms, end_ms in interburst_windows:
+        if end_ms <= start_ms:
+            continue
+        n_bins = int(np.ceil((end_ms - start_ms) / bin_ms))
+        if n_bins <= 0:
+            continue
+        bin_active_counts = np.zeros(n_bins)
+        for spike_times in spike_data.values():
+            if len(spike_times) == 0:
+                continue
+            spike_times_array = np.asarray(spike_times, dtype=float)
+            mask = (spike_times_array >= start_ms) & (spike_times_array < end_ms)
+            if not np.any(mask):
+                continue
+            bin_indices = np.floor((spike_times_array[mask] - start_ms) / bin_ms).astype(int)
+            bin_indices = bin_indices[(bin_indices >= 0) & (bin_indices < n_bins)]
+            bin_active_counts[np.unique(bin_indices)] += 1
+        active_fraction = bin_active_counts / n_neurons
+        active_bins += int(np.sum(active_fraction > 0.0))
+        total_bins += n_bins
+    active_bin_fraction = active_bins / total_bins if total_bins > 0 else 0.0
+    return active_bins, total_bins, active_bin_fraction
 
 
 def run_h_current_step_probe(use_h_current=True, step_current_nA=-0.12, duration_ms=1200.0, dt=0.1):
@@ -101,6 +142,19 @@ def run_no_stimulation_validation(
     use_h_current=True,
     test_duration_ms=10000,
     requested_voltage_sample_rate=0.25,
+    background_noise_sigma=0.0,
+    baseline_drive_mean=0.11,
+    baseline_drive_sd=0.05,
+    baseline_drive_seed=None,
+    baseline_distribution="gaussian",
+    noise_sigma=0.0,
+    adaptation_tau_scale=1.0,
+    adaptation_increment_scale=1.0,
+    exc_weight_scale=0.65,
+    state_bin_ms=5.0,
+    burst_frac_thresh=0.12,
+    merge_gap_ms=30.0,
+    min_burst_ms=5.0,
     num_clusters=20,
     neurons_per_cluster_range=(12, 18),
     inhibitory_probability=0.2,
@@ -124,6 +178,18 @@ def run_no_stimulation_validation(
         use_h_current: Whether the generated network should include the h-current.
         test_duration_ms: Duration of the validation recording in milliseconds.
         requested_voltage_sample_rate: Legacy requested voltage sampling interval.
+        background_noise_sigma: Standard deviation of the additive membrane-noise
+            term requested by older callers. The no-stimulation validation forces
+            the actual neuron noise to zero and uses frozen baseline drive instead.
+        baseline_drive_mean: Mean frozen baseline current assigned to excitatory neurons.
+        baseline_drive_sd: Standard deviation of the frozen baseline current draw.
+        baseline_drive_seed: Optional seed for the baseline-current draw. Defaults
+            to ``seed`` so full validation runs remain reproducible.
+        exc_weight_scale: Multiplicative scale applied to recurrent excitatory weights.
+        state_bin_ms: Population-activity bin width for burst/inter-burst segmentation.
+        burst_frac_thresh: Active-neuron fraction threshold for burst bins.
+        merge_gap_ms: Gap below which adjacent burst candidates are merged.
+        min_burst_ms: Minimum retained burst-window duration.
         num_clusters: Number of clusters used when generating the network.
         neurons_per_cluster_range: Inclusive range used to sample cluster sizes.
         inhibitory_probability: Probability that a neuron is inhibitory.
@@ -150,6 +216,8 @@ def run_no_stimulation_validation(
     voltage_window_ms = min(voltage_window_ms, test_duration_ms)
     stimulation_events = []
     weight_params = NetworkWeightParameters()
+    if baseline_drive_seed is None:
+        baseline_drive_seed = seed
 
     neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
         num_clusters=num_clusters,
@@ -165,6 +233,35 @@ def run_no_stimulation_validation(
         hub_weight_scale=hub_weight_scale,
         hub_reciprocal_factor=hub_reciprocal_factor,
         use_h_current=use_h_current,
+        background_noise_sigma=0.0,
+    )
+
+    for neuron in neurons:
+        neuron.noise_sigma = noise_sigma
+    assign_baseline_drive(
+        neurons,
+        mean=baseline_drive_mean,
+        sd=baseline_drive_sd,
+        seed=baseline_drive_seed,
+        excitatory_only=True,
+        distribution=baseline_distribution,
+    )
+    scale_adaptation_dynamics(
+        neurons,
+        tau_scale=adaptation_tau_scale,
+        increment_scale=adaptation_increment_scale,
+    )
+    scale_excitatory_weights(synapses, exc_weight_scale, connections)
+    cluster_info.update(
+        {
+            "baseline_currents": np.array([neuron.i_baseline for neuron in neurons], dtype=float),
+            "baseline_drive_mean": float(baseline_drive_mean),
+            "baseline_drive_sd": float(baseline_drive_sd),
+            "baseline_drive_seed": int(baseline_drive_seed),
+            "baseline_excitatory_only": True,
+            "exc_weight_scale": float(exc_weight_scale),
+            "noise_sigma": np.zeros(len(neurons), dtype=float),
+        }
     )
 
     spike_data, voltage_data = simulate_network(
@@ -186,6 +283,33 @@ def run_no_stimulation_validation(
     firing_rates = np.array([len(spike_data[nid]) / duration_s for nid in range(n_neurons)])
     total_spikes = int(sum(len(spikes) for spikes in spike_data.values()))
     active_neurons = int(sum(len(spikes) > 0 for spikes in spike_data.values()))
+    final_window_start = max(0.0, test_duration_ms - 1000.0)
+    final_1000ms_spikes = int(
+        sum(np.sum(np.asarray(spikes, dtype=float) >= final_window_start) for spikes in spike_data.values())
+    )
+
+    burst_windows, interburst_windows = segment_states(
+        spike_data,
+        n_neurons,
+        test_duration_ms,
+        bin_ms=state_bin_ms,
+        burst_frac_thresh=burst_frac_thresh,
+        merge_gap_ms=merge_gap_ms,
+        min_burst_ms=min_burst_ms,
+    )
+    burst_spikes = _count_spikes_in_windows(spike_data, burst_windows)
+    interburst_spikes = _count_spikes_in_windows(spike_data, interburst_windows)
+    interburst_duration_s = sum(end_ms - start_ms for start_ms, end_ms in interburst_windows) / 1000.0
+    interburst_spike_fraction = interburst_spikes / total_spikes if total_spikes > 0 else 0.0
+    interburst_population_rate_hz = (
+        interburst_spikes / interburst_duration_s / n_neurons if interburst_duration_s > 0.0 else 0.0
+    )
+    interburst_active_bins, interburst_total_bins, interburst_active_bin_fraction = _active_interburst_bin_summary(
+        spike_data,
+        n_neurons,
+        interburst_windows,
+        state_bin_ms,
+    )
 
     bin_width_ms = 100.0
     n_bins = int(np.ceil(test_duration_ms / bin_width_ms))
@@ -204,14 +328,18 @@ def run_no_stimulation_validation(
     bins_ge_25 = int(np.sum(active_fraction >= 0.25))
     bins_ge_50 = int(np.sum(active_fraction >= 0.50))
 
-    if bins_ge_25 > 0 or max_active_fraction >= 0.25:
-        verdict = "FAIL_auto_bursting"
-    elif firing_rates.mean() < 0.05:
-        verdict = "FAIL_too_quiet"
-    elif 0.1 <= firing_rates.mean() <= 0.5 and max_active_fraction < 0.10:
-        verdict = "PASS_near_critical"
+    if final_1000ms_spikes == 0:
+        verdict = "FAIL_flatline"
+    elif len(burst_windows) == 0:
+        verdict = "FAIL_no_bursts"
+    elif len(interburst_windows) == 0 or interburst_spikes == 0:
+        verdict = "FAIL_no_interburst_baseline"
+    elif interburst_spike_fraction < 0.5:
+        verdict = "FAIL_burst_dominated"
+    elif interburst_population_rate_hz < 0.05:
+        verdict = "FAIL_interburst_too_quiet"
     else:
-        verdict = "BORDERLINE"
+        verdict = "PASS_spontaneous_baseline_bursts"
 
     active_ids = [nid for nid, spikes in spike_data.items() if len(spikes) > 0]
     if active_ids:
@@ -225,15 +353,33 @@ def run_no_stimulation_validation(
         "external_stimulation_events": len(stimulation_events),
         "test_duration_s": duration_s,
         "requested_voltage_sample_rate_ms": float(requested_voltage_sample_rate),
+        "requested_background_noise_sigma": float(background_noise_sigma),
+        "background_noise_sigma": 0.0,
+        "baseline_drive_mean": float(baseline_drive_mean),
+        "baseline_drive_sd": float(baseline_drive_sd),
+        "baseline_drive_seed": int(baseline_drive_seed),
+        "exc_weight_scale": float(exc_weight_scale),
         "saved_voltage_step_ms": saved_voltage_step_ms,
         "voltage_trace_mode": voltage_trace_mode,
         "raster_window_s": raster_window_ms / 1000.0,
         "n_neurons": n_neurons,
         "total_spikes": total_spikes,
+        "final_1000ms_spikes": final_1000ms_spikes,
         "active_neurons": active_neurons,
         "mean_rate_hz": float(firing_rates.mean()),
         "median_rate_hz": float(np.median(firing_rates)),
         "max_rate_hz": float(firing_rates.max()),
+        "burst_windows": len(burst_windows),
+        "interburst_windows": len(interburst_windows),
+        "burst_spikes": burst_spikes,
+        "interburst_spikes": interburst_spikes,
+        "interburst_spike_fraction": float(interburst_spike_fraction),
+        "interburst_population_rate_hz": float(interburst_population_rate_hz),
+        "interburst_active_bins": interburst_active_bins,
+        "interburst_total_bins": interburst_total_bins,
+        "interburst_active_bin_fraction": float(interburst_active_bin_fraction),
+        "state_bin_ms": float(state_bin_ms),
+        "burst_frac_thresh": float(burst_frac_thresh),
         "max_active_fraction_100ms": max_active_fraction,
         "bins_ge_10pct": bins_ge_10,
         "bins_ge_25pct": bins_ge_25,
@@ -252,6 +398,8 @@ def run_no_stimulation_validation(
         "spike_data": spike_data,
         "voltage_data": voltage_data,
         "cluster_assignments": cluster_assignments,
+        "burst_windows": burst_windows,
+        "interburst_windows": interburst_windows,
         "example_neuron_ids": example_neuron_ids,
         "raster_window_ms": raster_window_ms,
         "voltage_window_ms": voltage_window_ms,

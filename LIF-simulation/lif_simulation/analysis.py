@@ -61,6 +61,84 @@ def resample_data(spike_data, cluster_assignments, target_freq=10, duration=6000
     return resampled_spikes, resampled_time_points, resampled_spike_positions
 
 
+def segment_states(
+    spike_data,
+    n_neurons,
+    duration_ms,
+    bin_ms=5.0,
+    burst_frac_thresh=0.12,
+    merge_gap_ms=30.0,
+    min_burst_ms=5.0,
+):
+    """Split a recording into burst and inter-burst windows.
+
+    Args:
+        spike_data: Mapping from neuron id to spike times in milliseconds.
+        n_neurons: Number of neurons represented in ``spike_data``.
+        duration_ms: Recording duration in milliseconds.
+        bin_ms: Width of population-activity bins used for burst detection.
+        burst_frac_thresh: Active-neuron fraction above which a bin is marked as burst.
+        merge_gap_ms: Maximum gap between burst candidates that should be merged.
+        min_burst_ms: Minimum retained burst-window duration.
+
+    Returns:
+        A tuple ``(burst_windows, interburst_windows)`` where each list contains
+        ``(start_ms, end_ms)`` pairs.
+    """
+    if n_neurons <= 0:
+        raise ValueError("n_neurons must be positive.")
+    if bin_ms <= 0.0:
+        raise ValueError("bin_ms must be positive.")
+
+    n_bins = int(np.ceil(duration_ms / bin_ms))
+    active_fraction = np.zeros(n_bins)
+    for spike_times in spike_data.values():
+        if len(spike_times) == 0:
+            continue
+        bin_indices = np.floor(np.asarray(spike_times, dtype=float) / bin_ms).astype(int)
+        bin_indices = bin_indices[(bin_indices >= 0) & (bin_indices < n_bins)]
+        for bin_index in np.unique(bin_indices):
+            active_fraction[bin_index] += 1
+    active_fraction /= n_neurons
+
+    is_burst = active_fraction > burst_frac_thresh
+    raw_windows = []
+    bin_index = 0
+    while bin_index < n_bins:
+        if is_burst[bin_index]:
+            end_bin = bin_index
+            while end_bin < n_bins and is_burst[end_bin]:
+                end_bin += 1
+            raw_windows.append((bin_index * bin_ms, min(end_bin * bin_ms, duration_ms)))
+            bin_index = end_bin
+        else:
+            bin_index += 1
+
+    merged_windows = []
+    for start_ms, end_ms in raw_windows:
+        if merged_windows and start_ms - merged_windows[-1][1] < merge_gap_ms:
+            merged_windows[-1] = (merged_windows[-1][0], end_ms)
+        else:
+            merged_windows.append((start_ms, end_ms))
+
+    burst_windows = [
+        (float(start_ms), float(end_ms))
+        for start_ms, end_ms in merged_windows
+        if end_ms - start_ms >= min_burst_ms
+    ]
+
+    interburst_windows = []
+    previous_end = 0.0
+    for start_ms, end_ms in burst_windows:
+        if start_ms > previous_end:
+            interburst_windows.append((float(previous_end), float(start_ms)))
+        previous_end = end_ms
+    if previous_end < duration_ms:
+        interburst_windows.append((float(previous_end), float(duration_ms)))
+
+    return burst_windows, interburst_windows
+
+
 def report_network_statistics(spike_data, neurons, connections, duration):
     """Print a quick descriptive summary of one saved recording.
 

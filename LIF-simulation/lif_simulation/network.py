@@ -273,6 +273,114 @@ def add_hub_connections(
     return hub_connections
 
 
+def assign_baseline_drive(
+    neurons, mean=0.11, sd=0.05, seed=0, excitatory_only=True, distribution="gaussian"
+):
+    """Assign frozen heterogeneous baseline current to neurons.
+
+    Args:
+        neurons: Sequence of ``LIFNeuron`` objects to configure.
+        mean: Mean baseline drive in nA-equivalent units. For the default
+            excitatory parameters, this should stay below rheobase at about
+            0.115 nA-equivalent.
+        sd: Standard deviation of the baseline-drive distribution.
+        seed: Seed for the one-time frozen-disorder draw.
+        excitatory_only: Whether inhibitory neurons should receive zero baseline
+            drive and be recruited only synaptically.
+        distribution: ``"gaussian"`` (default, preserves prior behaviour) or
+            ``"lognormal"``. The lognormal option produces the right-skewed,
+            heavy-tailed firing-rate distribution seen in real cortical
+            populations while keeping the same target ``mean`` and ``sd``.
+
+    Returns:
+        None. The function mutates each neuron's ``i_baseline`` in place.
+    """
+    if sd < 0.0:
+        raise ValueError("Baseline-drive standard deviation must be non-negative.")
+    if distribution not in ("gaussian", "lognormal"):
+        raise ValueError("distribution must be 'gaussian' or 'lognormal'.")
+
+    default_exc_rheobase = (-50.0 - -61.5) / 100.0
+    if mean >= default_exc_rheobase:
+        raise ValueError(
+            "Baseline-drive mean should stay below the default excitatory "
+            f"rheobase (~{default_exc_rheobase:.3f} nA-equivalent)."
+        )
+
+    # Lognormal parameters chosen so the resulting samples keep the requested
+    # arithmetic mean and standard deviation (method-of-moments mapping).
+    if distribution == "lognormal" and mean > 0.0:
+        log_sigma = float(np.sqrt(np.log(1.0 + (sd / mean) ** 2)))
+        log_mu = float(np.log(mean) - 0.5 * log_sigma ** 2)
+
+    rng = np.random.default_rng(seed)
+    for neuron in neurons:
+        if excitatory_only and neuron.is_inhibitory:
+            neuron.i_baseline = 0.0
+        elif distribution == "lognormal" and mean > 0.0:
+            neuron.i_baseline = float(rng.lognormal(log_mu, log_sigma))
+        else:
+            neuron.i_baseline = max(0.0, float(rng.normal(mean, sd)))
+
+
+def scale_excitatory_weights(synapses, scale, connections=None):
+    """Scale recurrent excitatory synaptic strength in place.
+
+    Args:
+        synapses: Sequence of ``ExpSynapse`` objects to update.
+        scale: Multiplicative scale applied to excitatory weights and conductance
+            increments.
+        connections: Optional connection table to keep saved weights consistent
+            with the synapse objects.
+
+    Returns:
+        None. The function mutates synapses and, when supplied, the connection
+        table in place.
+    """
+    if scale < 0.0:
+        raise ValueError("Excitatory weight scale must be non-negative.")
+
+    for synapse in synapses:
+        if not synapse.is_inhibitory:
+            synapse.weight *= scale
+            synapse.g_increment *= scale
+
+    if connections is not None:
+        for connection in connections:
+            if connection[3] == "exc":
+                connection[2] = float(connection[2]) * scale
+
+
+def scale_adaptation_dynamics(
+    neurons, tau_scale=1.0, increment_scale=1.0, excitatory_only=False
+):
+    """Scale spike-frequency-adaptation strength and time constant in place.
+
+    Slowing adaptation recovery (``tau_scale`` > 1) lengthens the post-burst
+    refractory period and spaces network bursts further apart, moving the burst
+    rate toward the seconds-scale spacing seen in dissociated cultures.
+    Increasing ``increment_scale`` deepens the per-spike adaptation, which also
+    reduces burst rate and curbs runaway high-frequency firing.
+
+    Args:
+        neurons: Sequence of ``LIFNeuron`` objects to update.
+        tau_scale: Multiplicative factor applied to ``tau_adaptation``.
+        increment_scale: Multiplicative factor applied to ``adaptation_increment``.
+        excitatory_only: Whether to skip inhibitory neurons.
+
+    Returns:
+        None. The function mutates each neuron's adaptation parameters in place.
+    """
+    if tau_scale <= 0.0 or increment_scale < 0.0:
+        raise ValueError("tau_scale must be > 0 and increment_scale must be >= 0.")
+
+    for neuron in neurons:
+        if excitatory_only and neuron.is_inhibitory:
+            continue
+        neuron.tau_adaptation *= tau_scale
+        neuron.adaptation_increment *= increment_scale
+
+
 def create_clustered_network(
     num_clusters=20,
     neurons_per_cluster_range=(12, 18),
@@ -288,6 +396,7 @@ def create_clustered_network(
     hub_weight_scale=1.5,
     hub_reciprocal_factor=2.0,
     use_h_current=True,
+    background_noise_sigma=0.0,
 ):
     """Build the clustered conductance-based network used by the simulation pipeline.
 
@@ -306,6 +415,8 @@ def create_clustered_network(
         hub_weight_scale: Multiplier applied to hub-originating weights.
         hub_reciprocal_factor: Extra probability boost for hub-to-hub projections.
         use_h_current: Whether newly created neurons should update the h-current.
+        background_noise_sigma: Standard deviation of the additive membrane-noise
+            term assigned to each created neuron.
 
     Returns:
         Neurons, synapses, connection table, neuron positions, and cluster metadata.
@@ -342,7 +453,12 @@ def create_clustered_network(
             pos = center + radius * np.array([np.cos(angle), np.sin(angle)])
             is_inhibitory = np.random.random() < inhibitory_probability
 
-            neuron = LIFNeuron(neuron_id, is_inhibitory, use_h_current=use_h_current)
+            neuron = LIFNeuron(
+                neuron_id,
+                is_inhibitory,
+                use_h_current=use_h_current,
+                noise_sigma=background_noise_sigma,
+            )
             neurons.append(neuron)
             neuron_positions.append(pos)
             cluster_assignments.append(cluster_id)

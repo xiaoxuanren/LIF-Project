@@ -18,7 +18,7 @@ class LIFNeuron:
         simulation.
     """
 
-    def __init__(self, neuron_id, is_inhibitory=False, use_h_current=True):
+    def __init__(self, neuron_id, is_inhibitory=False, use_h_current=True, noise_sigma=0.0):
         """Initialize one neuron and load the parameter set for its cell type.
 
         Args:
@@ -27,6 +27,7 @@ class LIFNeuron:
                 set instead of the excitatory one.
             use_h_current: Whether the slow h-current should be active after
                 initialization.
+            noise_sigma: Standard deviation of the additive membrane-noise term.
 
         Returns:
             None. The constructor initializes the neuron's static parameters and
@@ -56,7 +57,7 @@ class LIFNeuron:
         self.v_floor = -80.0
         self.R_m = 100.0
         self.tau_ref = 2.0
-        self.noise_sigma = 1.05
+        self.noise_sigma = float(noise_sigma)
 
         self.e_h = -35.0
         self.v_half_h = -75.0
@@ -71,6 +72,7 @@ class LIFNeuron:
         self.e_exc = 0.0
         self.e_inh = -75.0
         self.i_ext = 0.0
+        self.i_baseline = 0.0
         self.i_adapt = 0.0
 
         self.g_h_max_base = self.g_h_max
@@ -136,11 +138,13 @@ class LIFNeuron:
             self.v = self.v_reset
             return False
 
-        noise = np.random.normal(0, self.noise_sigma) * np.sqrt(dt)
+        noise = 0.0
+        if self.noise_sigma > 0.0:
+            noise = np.random.normal(0.0, self.noise_sigma) * np.sqrt(dt)
 
         i_exc = self.g_exc * (self.e_exc - self.v)
         i_inh = self.g_inh * (self.e_inh - self.v)
-        current_term = self.R_m * (i_exc + i_inh + self.i_h + self.i_ext - self.i_adapt)
+        current_term = self.R_m * (i_exc + i_inh + self.i_h + self.i_ext + self.i_baseline - self.i_adapt)
         dv = ((self.v_rest - self.v) + current_term) * dt / self.tau_m + noise
         self.v += dv
 

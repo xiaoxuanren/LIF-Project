@@ -2,9 +2,9 @@ import json
 import os
 from datetime import datetime
 
-from .analysis import report_network_statistics
+from .analysis import report_network_statistics, segment_states
 from .models import NetworkWeightParameters
-from .network import create_clustered_network
+from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
 from .session_io import save_network_structure, save_recording_data
 from .simulation import simulate_network
 from .stimulation import create_periodic_cluster_stimulation
@@ -29,6 +29,16 @@ def sequential_simulation_individual_saves(
     space_size=15,
     max_connection_distance=8.0,
     use_h_current=True,
+    background_noise_sigma=0.0,
+    spontaneous_baseline_mean=0.11,
+    spontaneous_baseline_sd=0.05,
+    spontaneous_baseline_seed=0,
+    spontaneous_baseline_distribution="lognormal",
+    spontaneous_noise_sigma=0.0,
+    spontaneous_adaptation_tau_scale=3.0,
+    spontaneous_adaptation_increment_scale=1.0,
+    spontaneous_exc_weight_scale=0.65,
+    spontaneous_burst_frac_thresh=0.12,
     burst_interval=7000,
     cluster_fraction=0.7,
     neurons_per_cluster=6,
@@ -60,6 +70,17 @@ def sequential_simulation_individual_saves(
         space_size: Side length of the 2-D spatial layout.
         max_connection_distance: Maximum allowed connection distance.
         use_h_current: Whether to keep the slow h-current update path enabled.
+        background_noise_sigma: Standard deviation of the additive membrane-noise
+            term assigned to each neuron for stimulus-driven runs. Spontaneous
+            mode forces this to zero and uses frozen baseline drive instead.
+        spontaneous_baseline_mean: Mean frozen excitatory baseline current used
+            when stimulation is disabled.
+        spontaneous_baseline_sd: Standard deviation of the frozen baseline draw.
+        spontaneous_baseline_seed: Seed for the one-time baseline-current draw.
+        spontaneous_exc_weight_scale: Scale applied to recurrent excitatory weights
+            when stimulation is disabled.
+        spontaneous_burst_frac_thresh: Active-neuron fraction used to detect
+            spontaneous burst windows for saved recordings.
         burst_interval: Nominal interval between stimulation bursts in milliseconds.
         cluster_fraction: Fraction of clusters stimulated during each burst.
         neurons_per_cluster: Number of neurons stimulated in each selected cluster.
@@ -111,12 +132,19 @@ def sequential_simulation_individual_saves(
     print(f"Space size: {space_size}")
     print(f"Max connection distance: {max_connection_distance}")
     print(f"Target resampling frequency: {target_freq} Hz")
+    print(f"Background membrane noise sigma: {background_noise_sigma}")
     if stimulation_enabled:
         print(f"Burst interval: {burst_interval} ms ({1000 / burst_interval:.2f} Hz) +/- {burst_interval_jitter} ms")
         print(f"Cluster fraction: {cluster_fraction * 100:.0f}%")
         print(f"Neurons per cluster: {neurons_per_cluster}")
     else:
         print("Stimulation: disabled")
+        print("Spontaneous drive: frozen excitatory baseline, membrane noise forced to 0")
+        print(
+            f"Baseline mean={spontaneous_baseline_mean:.3f}, sd={spontaneous_baseline_sd:.3f}, "
+            f"seed={spontaneous_baseline_seed}"
+        )
+        print(f"Excitatory recurrent weight scale: {spontaneous_exc_weight_scale:.3f}")
     print(f"Hub fraction: {hub_fraction * 100:.0f}% | Hub between prob: {hub_between_prob}")
     print(f"Hub weight scale: {hub_weight_scale}x | Hub reciprocal factor: {hub_reciprocal_factor}x")
     print("=" * 70 + "\n")
@@ -137,7 +165,43 @@ def sequential_simulation_individual_saves(
         hub_weight_scale=hub_weight_scale,
         hub_reciprocal_factor=hub_reciprocal_factor,
         use_h_current=use_h_current,
+        background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
     )
+    if stimulation_enabled:
+        actual_background_noise_sigma = float(background_noise_sigma)
+        baseline_currents = [neuron.i_baseline for neuron in neurons]
+        exc_weight_scale = 1.0
+    else:
+        for neuron in neurons:
+            neuron.noise_sigma = spontaneous_noise_sigma
+        assign_baseline_drive(
+            neurons,
+            mean=spontaneous_baseline_mean,
+            sd=spontaneous_baseline_sd,
+            seed=spontaneous_baseline_seed,
+            excitatory_only=True,
+            distribution=spontaneous_baseline_distribution,
+        )
+        scale_adaptation_dynamics(
+            neurons,
+            tau_scale=spontaneous_adaptation_tau_scale,
+            increment_scale=spontaneous_adaptation_increment_scale,
+        )
+        scale_excitatory_weights(synapses, spontaneous_exc_weight_scale, connections)
+        actual_background_noise_sigma = float(spontaneous_noise_sigma)
+        baseline_currents = [neuron.i_baseline for neuron in neurons]
+        exc_weight_scale = float(spontaneous_exc_weight_scale)
+        cluster_info.update(
+            {
+                "baseline_currents": baseline_currents,
+                "baseline_drive_mean": float(spontaneous_baseline_mean),
+                "baseline_drive_sd": float(spontaneous_baseline_sd),
+                "baseline_drive_seed": int(spontaneous_baseline_seed),
+                "baseline_excitatory_only": True,
+                "exc_weight_scale": exc_weight_scale,
+                "noise_sigma": [neuron.noise_sigma for neuron in neurons],
+            }
+        )
     print("Background presynaptic input: DISABLED")
 
     network_file = save_network_structure(
@@ -185,6 +249,13 @@ def sequential_simulation_individual_saves(
         "n_hub_connections": cluster_info.get("n_hub_connections", 0),
         "synapse_model": "conductance-based with legacy weight scaling",
         "use_h_current": bool(use_h_current),
+        "requested_background_noise_sigma": float(background_noise_sigma),
+        "background_noise_sigma": actual_background_noise_sigma,
+        "spontaneous_baseline_mean": float(spontaneous_baseline_mean) if not stimulation_enabled else 0.0,
+        "spontaneous_baseline_sd": float(spontaneous_baseline_sd) if not stimulation_enabled else 0.0,
+        "spontaneous_baseline_seed": int(spontaneous_baseline_seed) if not stimulation_enabled else None,
+        "spontaneous_exc_weight_scale": exc_weight_scale,
+        "spontaneous_burst_frac_thresh": float(spontaneous_burst_frac_thresh),
         "h_current_mode": "enabled" if use_h_current else "disabled_skip_update_path",
         "recordings": [],
     }
@@ -218,17 +289,20 @@ def sequential_simulation_individual_saves(
                 elif voltage_storage_backend != "inline_npz":
                     raise ValueError(f"Unsupported voltage_storage_backend: {voltage_storage_backend}")
 
-            stimulation_events, burst_onset_times = create_periodic_cluster_stimulation(
-                neurons,
-                cluster_info,
-                burst_interval=burst_interval,
-                cluster_fraction=cluster_fraction,
-                neurons_per_cluster=neurons_per_cluster,
-                stim_amplitude_range=stim_amplitude_range,
-                stim_duration_range=stim_duration_range,
-                simulation_duration=recording_duration,
-                burst_interval_jitter=burst_interval_jitter,
-            )
+            if stimulation_enabled:
+                stimulation_events, burst_onset_times = create_periodic_cluster_stimulation(
+                    neurons,
+                    cluster_info,
+                    burst_interval=burst_interval,
+                    cluster_fraction=cluster_fraction,
+                    neurons_per_cluster=neurons_per_cluster,
+                    stim_amplitude_range=stim_amplitude_range,
+                    stim_duration_range=stim_duration_range,
+                    simulation_duration=recording_duration,
+                    burst_interval_jitter=burst_interval_jitter,
+                )
+            else:
+                stimulation_events, burst_onset_times = [], []
 
             spike_data, voltage_data = simulate_network(
                 neurons,
@@ -243,6 +317,22 @@ def sequential_simulation_individual_saves(
             )
 
             report_network_statistics(spike_data, neurons, connections, recording_duration)
+            burst_windows = None
+            interburst_windows = None
+            if not stimulation_enabled:
+                burst_windows, interburst_windows = segment_states(
+                    spike_data,
+                    len(neurons),
+                    recording_duration,
+                    bin_ms=5.0,
+                    burst_frac_thresh=spontaneous_burst_frac_thresh,
+                    merge_gap_ms=30.0,
+                    min_burst_ms=5.0,
+                )
+                print(
+                    f"Detected {len(burst_windows)} burst windows and "
+                    f"{len(interburst_windows)} inter-burst windows"
+                )
             recording_file = save_recording_data(
                 spike_data,
                 voltage_data,
@@ -253,6 +343,8 @@ def sequential_simulation_individual_saves(
                 target_freq,
                 recording_duration,
                 burst_onset_times=burst_onset_times,
+                burst_windows=burst_windows,
+                interburst_windows=interburst_windows,
             )
 
             session_metadata["recordings"].append(
@@ -261,6 +353,8 @@ def sequential_simulation_individual_saves(
                     "file": recording_file,
                     "success": True,
                     "num_spikes": sum(len(spikes) for spikes in spike_data.values()),
+                    "n_burst_windows": len(burst_windows) if burst_windows is not None else None,
+                    "n_interburst_windows": len(interburst_windows) if interburst_windows is not None else None,
                 }
             )
             print(f"Recording {rec_idx + 1} completed successfully!")

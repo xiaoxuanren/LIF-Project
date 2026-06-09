@@ -71,6 +71,15 @@ def save_network_structure(connections, neuron_positions, cluster_info, weight_p
         save_dict["hub_reciprocal_factor"] = cluster_info.get("hub_reciprocal_factor", 2.0)
         save_dict["n_hub_connections"] = cluster_info.get("n_hub_connections", 0)
 
+    if "baseline_currents" in cluster_info:
+        save_dict["baseline_currents"] = np.asarray(cluster_info["baseline_currents"], dtype=float)
+        save_dict["baseline_drive_mean"] = cluster_info.get("baseline_drive_mean", 0.0)
+        save_dict["baseline_drive_sd"] = cluster_info.get("baseline_drive_sd", 0.0)
+        save_dict["baseline_drive_seed"] = cluster_info.get("baseline_drive_seed", 0)
+        save_dict["baseline_excitatory_only"] = cluster_info.get("baseline_excitatory_only", True)
+        save_dict["exc_weight_scale"] = cluster_info.get("exc_weight_scale", 1.0)
+        save_dict["noise_sigma"] = np.asarray(cluster_info.get("noise_sigma", []), dtype=float)
+
     np.savez_compressed(filename, **save_dict)
     print(f"Network structure saved to: {filename}")
     if "hub_neuron_ids" in cluster_info:
@@ -89,6 +98,8 @@ def save_recording_data(
     target_freq=10,
     duration=60000,
     burst_onset_times=None,
+    burst_windows=None,
+    interburst_windows=None,
 ):
     """Persist one recording's spike, voltage, and resampled analysis outputs.
 
@@ -102,6 +113,8 @@ def save_recording_data(
         target_freq: Frequency used to build saved resampled spike rasters.
         duration: Recording duration in milliseconds.
         burst_onset_times: Optional stimulation onset times to save with the recording.
+        burst_windows: Optional detected network-burst windows for spontaneous recordings.
+        interburst_windows: Optional complement windows between detected bursts.
 
     Returns:
         The path to the saved compressed recording file.
@@ -154,6 +167,11 @@ def save_recording_data(
     if burst_onset_times is not None:
         save_dict["burst_onset_times"] = np.array(burst_onset_times)
 
+    if burst_windows is not None:
+        save_dict["burst_windows"] = np.asarray(burst_windows, dtype=float).reshape(-1, 2)
+    if interburst_windows is not None:
+        save_dict["interburst_windows"] = np.asarray(interburst_windows, dtype=float).reshape(-1, 2)
+
     np.savez_compressed(filename, **save_dict)
     print(f"Recording {recording_idx} saved to: {filename}")
     print(f"  - Original spike times: {len(spike_times_list)} neurons")
@@ -174,6 +192,10 @@ def save_recording_data(
             )
     if burst_onset_times is not None:
         print(f"  - Burst onset times: {len(burst_onset_times)} stimuli")
+    if burst_windows is not None:
+        print(f"  - Detected burst windows: {len(burst_windows)}")
+    if interburst_windows is not None:
+        print(f"  - Inter-burst windows: {len(interburst_windows)}")
     return filename
 
 

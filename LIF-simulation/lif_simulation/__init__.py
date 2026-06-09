@@ -4,10 +4,11 @@ from .analysis import (
     organize_spike_data_by_cluster,
     report_network_statistics,
     resample_data,
+    segment_states,
     validate_hub_structure,
 )
 from .models import ExpSynapse, LIFNeuron, NetworkWeightParameters
-from .network import create_clustered_network
+from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
 from .plotting import (
     plot_combined_network_layout,
     plot_firing_rates,
@@ -45,6 +46,7 @@ __all__ = [
     "LIFNeuron",
     "NetworkWeightParameters",
     "analyze_spike_trains",
+    "assign_baseline_drive",
     "build_hub_cluster_info",
     "combine_session_data",
     "compute_hub_firing_rate_groups",
@@ -75,7 +77,10 @@ __all__ = [
     "save_network_structure",
     "save_recording_data",
     "sequential_simulation_individual_saves",
+    "segment_states",
     "simulate_network",
+    "scale_excitatory_weights",
+    "scale_adaptation_dynamics",
     "summarize_h_current_step_probe",
     "validate_hub_structure",
 ]
