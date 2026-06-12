@@ -11,7 +11,6 @@ The main simulation surface is a conductance-based LIF notebook with a slow hype
 - `LIF_network_simulation_network_burst_conductance_modular.ipynb` — Import-based orchestration notebook for the modular package.
 - `learned_lif_connectivity_modular.ipynb` — Import-based orchestration notebook for the learned-LIF inference package.
 - `scripts/` — CLI helpers for validation, saved simulation runs, saved-session plotting, ablation comparison, raw-voltage inspection, and voltage-lambda sweeps.
-- `LIF_network_simulation_network_burst_conductance.ipynb` — Main notebook for simulation, validation, saving, loading, and visualization.
 - `docs/` — Reference notes moved out of the root workflow surface.
 
 For a longer supported-only script reference, see `docs/SCRIPT_DETAILS.md`.
@@ -35,8 +34,6 @@ If you are opening this repository for the first time, use this order:
 4. Enable `execute_main_simulation = True` only when the validation outputs look correct.
 5. After a session is saved under `LIF data/<timestamp>`, inspect it with `python -m scripts.plot_saved_session latest` or the later notebook cells.
 6. Open `learned_lif_connectivity_modular.ipynb` only after you have a saved session to train on.
-
-Use the monolithic `LIF_network_simulation_network_burst_conductance.ipynb` notebook only when you need the original all-in-one reference workflow for parity checks or extraction history. For new runs, prefer the modular notebook plus the shared `lif_simulation/` package.
 
 ## Quick Start
 
@@ -75,12 +72,6 @@ For a first run in the modular notebook:
 - When those look reasonable, set `execute_main_simulation = True` and rerun the main simulation cell.
 - Keep `burst_interval` very large together with `cluster_fraction = 0.0` and `neurons_per_cluster = 0` for spontaneous runs.
 - Use finite `burst_interval` plus nonzero cluster stimulation settings for stimulus-driven burst experiments.
-
-The original extraction-reference notebook remains available as:
-
-```text
-LIF_network_simulation_network_burst_conductance.ipynb
-```
 
 The modular notebook and thin scripts call shared plotting code in `lif_simulation/plotting.py`, so raster plots, voltage traces, heatmaps, network layouts, resampled rasters, and hub-analysis figures all come from a single implementation path.
 
@@ -150,7 +141,6 @@ Reference-only markdown notes have been moved under `docs/` so the repository ro
 - `lif_inference/learned_lif_connectivity.py` — Packaged spike-only learned-LIF CLI module
 - `lif_inference/voltage_augmented_learned_lif_connectivity.py` — Packaged voltage-augmented learned-LIF CLI module
 - `docs/` — Reference notes and project summaries not needed for day-to-day execution
-- `LIF_network_simulation_network_burst_conductance.ipynb` — Main conductance + optional h-current simulation notebook
 - `SCRIPTS_SUMMARY.md` — Current file inventory and parameter summary
 - `CLAUDE.md` — Repo-local project notes and current workflow summary
 
@@ -169,6 +159,6 @@ If you clone this repository, expect to generate simulation data and trained-mod
 
 ## Current Status
 
-The supported root workflow is now intentionally limited to the conductance-based simulation surface plus the learned-LIF inference surface. The original conductance notebook is retained as the extraction/parity reference, while the modular simulation and learned-LIF notebooks are the cleaner orchestration paths for new runs.
+The supported root workflow is now intentionally limited to the conductance-based simulation surface plus the learned-LIF inference surface. The modular simulation and learned-LIF notebooks are the orchestration paths for new runs.
 
 Inside `lif_inference/`, the stable public entry points remain `learned_lif_connectivity.py` and `voltage_augmented_learned_lif_connectivity.py`, while shared internals are now split across focused helper modules for candidate selection, burst exclusion, event windows, event-window training, surrogate thresholding, and voltage-side orchestration.

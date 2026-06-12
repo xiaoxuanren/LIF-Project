@@ -7,8 +7,7 @@ Archived GNN, classical baseline, presentation, scratch, and legacy helper mater
 ## Current Supported Surface
 
 ```
-LIF_network_simulation_network_burst_conductance.ipynb            (Step 1: main conductance-based simulation notebook)
-LIF_network_simulation_network_burst_conductance_modular.ipynb    (Step 1a: modular simulation notebook over lif_simulation/)
+LIF_network_simulation_network_burst_conductance_modular.ipynb    (Step 1: modular simulation notebook over lif_simulation/)
 scripts/run_conductance_simulation.py                             (Step 1b: CLI simulation entry point)
 scripts/run_no_stim_validation.py                                 (Validation: spontaneous near-criticality check)
 scripts/run_h_current_sag_probe.py                                (Validation: single-neuron h-current sag/rebound probe)
@@ -36,12 +35,7 @@ lif_inference/                                                    (Shared learne
 - Current notebook structure is a 7-cell import-based workflow: intro, imports, config, no-stimulation validation, h-current sag probe, optional simulation, and saved-session load/analysis.
 - Uses `lif_simulation/` for the actual model, network construction, simulation loop, save/load helpers, analysis, and plotting.
 - Best when you want notebook-level control without duplicating the simulation implementation.
-
-**`LIF_network_simulation_network_burst_conductance.ipynb`**
-- Source-of-truth monolithic conductance notebook retained for parity checks and direct scientific inspection.
-- Implements the clustered conductance-based LIF network, optional slow h-current, raw full-dt voltage saving, no-stimulation validation, and h-current sag/rebound probing.
 - Output: `LIF data/<timestamp>/` folders containing `network_<ts>.npz`, `recording000.npz`, ..., and `session_metadata.json`.
-- This remains the best reference when you need to inspect the full scientific workflow in one place.
 
 **Thin simulation-side scripts**
 - `scripts/run_conductance_simulation.py` — non-notebook saved-session generation.
@@ -100,7 +94,7 @@ lif_inference/                                                    (Shared learne
 
 ---
 
-## `LIF_network_simulation_network_burst_conductance.ipynb` — Core Parameter Reference
+## Conductance Simulation — Core Parameter Reference
 
 These values reflect the current conductance-notebook defaults documented in the maintained repo notes.
 

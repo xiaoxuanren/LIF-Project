@@ -10,7 +10,6 @@ The current primary simulation surface is the conductance-based notebook with a 
 
 ### Main Simulation
 - `LIF_network_simulation_network_burst_conductance_modular.ipynb` — Recommended simulation notebook. Imports `lif_simulation/` instead of embedding the full pipeline inline.
-- `LIF_network_simulation_network_burst_conductance.ipynb` — Monolithic conductance reference notebook retained for parity checks and extraction history.
 - `scripts/run_conductance_simulation.py` — Thin CLI for saved simulation sessions.
 - `scripts/run_no_stim_validation.py` — Thin CLI for the spontaneous near-criticality validation.
 - `scripts/run_h_current_sag_probe.py` — Thin CLI for the h-current sag/rebound probe.
@@ -102,7 +101,7 @@ These reflect the current conductance notebook defaults and supporting summary d
 ## Common Tasks
 
 ### Run a Simulation
-Open `LIF_network_simulation_network_burst_conductance.ipynb` and execute the cells in order. Adjust execution parameters in the main run cell near the end of the notebook, including `use_h_current` when you want an ablation run.
+Open `LIF_network_simulation_network_burst_conductance_modular.ipynb` and execute the cells in order. Adjust execution parameters in the configuration cell, including `use_h_current` when you want an ablation run.
 
 ### Validate Spontaneous Activity
 Run the zero-stimulation validation cell in the conductance notebook. The target regime is sparse spontaneous firing with no synchronized auto-bursts. Use `use_h_current_test` when you want a matched comparison with h-current disabled.

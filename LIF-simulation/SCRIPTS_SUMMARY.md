@@ -10,7 +10,6 @@ Out-of-scope GNN, classical baseline, presentation, scratch, and legacy helper m
 lif_simulation/                                    Shared simulation package
 lif_inference/                                     Shared learned-LIF inference package
 scripts/                                           CLI helpers and analysis utilities
-LIF_network_simulation_network_burst_conductance.ipynb          Monolithic conductance reference notebook
 LIF_network_simulation_network_burst_conductance_modular.ipynb  Recommended modular simulation notebook
 learned_lif_connectivity_modular.ipynb                          Recommended modular learned-LIF notebook
 scripts/run_conductance_simulation.py              Thin CLI for simulation runs
@@ -48,10 +47,6 @@ Equivalent CLI entry points:
 - `scripts/run_h_current_sag_probe.py`
 - `scripts/run_conductance_simulation.py`
 - `scripts/plot_saved_session.py`
-
-Reference notebook retained for parity and extraction history:
-
-- `LIF_network_simulation_network_burst_conductance.ipynb`
 
 ### 2. Fit Learned-LIF Connectivity Models
 
