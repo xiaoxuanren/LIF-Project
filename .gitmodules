@@ -1,0 +1,3 @@
+[submodule "external/nc_sim"]
+	path = external/nc_sim
+	url = https://github.com/akkeh/nc_sim.git

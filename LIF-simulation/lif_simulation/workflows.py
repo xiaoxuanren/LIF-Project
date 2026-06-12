@@ -5,10 +5,24 @@ from datetime import datetime
 from .analysis import report_network_statistics, segment_states
 from .models import NetworkWeightParameters
 from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
+from .nc_sim_path import ensure_nc_sim_importable
 from .session_io import save_network_structure, save_recording_data
 from .simulation import simulate_network
 from .stimulation import create_periodic_cluster_stimulation
 from .voltage_storage import ChunkedHdf5VoltageRecorder
+
+
+def _obstacles_to_jsonable(obstacles):
+    """Return a JSON-serializable view of an nc_sim obstacle grid.
+
+    Accepts ``None``, a plain nested list, or a NumPy array and returns a value
+    ``json.dump`` can serialize without importing NumPy here.
+    """
+    if obstacles is None:
+        return None
+    if hasattr(obstacles, "tolist"):
+        return obstacles.tolist()
+    return obstacles
 
 
 def sequential_simulation_individual_saves(
@@ -49,6 +63,12 @@ def sequential_simulation_individual_saves(
     hub_between_prob=0.4,
     hub_weight_scale=1.5,
     hub_reciprocal_factor=2.0,
+    network_source="clustered",
+    nc_sim_width=1.0,
+    nc_sim_height=1.0,
+    nc_sim_rho=100.0,
+    nc_sim_axon_length=1.0,
+    nc_sim_obstacles=None,
 ):
     """Run a multi-recording simulation session and save each trial to disk.
 
@@ -91,6 +111,19 @@ def sequential_simulation_individual_saves(
         hub_between_prob: Base inter-cluster connection probability for hub projections.
         hub_weight_scale: Multiplicative weight boost applied to hub-originating edges.
         hub_reciprocal_factor: Probability boost used for hub-to-hub projections.
+        network_source: Topology generator to use. ``"clustered"`` (default)
+            preserves the existing ``create_clustered_network`` behavior exactly;
+            ``"nc_sim"`` grows the topology with the nc_sim spatial axon-growth
+            model via ``build_network_from_nc_sim`` (a drop-in replacement). The
+            ``nc_sim_*`` arguments are ignored unless this is ``"nc_sim"``.
+        nc_sim_width: Culture width in mm passed to nc_sim growth.
+        nc_sim_height: Culture height in mm passed to nc_sim growth.
+        nc_sim_rho: Neuron density (neurons / mm^2) for nc_sim growth. With
+            ``nc_sim_width = nc_sim_height = 1`` this is roughly the neuron count.
+        nc_sim_axon_length: Average axon length ``L`` in mm; the structural
+            burst-synchrony dial for nc_sim growth.
+        nc_sim_obstacles: Optional nc_sim ``H`` obstacle grid (``None`` for a flat
+            isotropic culture).
 
     Returns:
         A session metadata dictionary describing the generated network and recordings.
@@ -150,23 +183,44 @@ def sequential_simulation_individual_saves(
     print("=" * 70 + "\n")
 
     print("Creating network...")
+    print(f"Network source: {network_source}")
     weight_params = NetworkWeightParameters()
-    neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
-        num_clusters=num_clusters,
-        neurons_per_cluster_range=neurons_per_cluster_range,
-        inhibitory_probability=inhibitory_probability,
-        within_cluster_prob=within_cluster_prob,
-        between_cluster_prob=between_cluster_prob,
-        max_connection_distance=max_connection_distance,
-        weight_params=weight_params,
-        space_size=space_size,
-        hub_fraction=hub_fraction,
-        hub_between_prob=hub_between_prob,
-        hub_weight_scale=hub_weight_scale,
-        hub_reciprocal_factor=hub_reciprocal_factor,
-        use_h_current=use_h_current,
-        background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
-    )
+    if network_source == "nc_sim":
+        ensure_nc_sim_importable()
+        from .nc_sim_adapter import build_network_from_nc_sim
+
+        neurons, synapses, connections, neuron_positions, cluster_info = build_network_from_nc_sim(
+            width=nc_sim_width,
+            height=nc_sim_height,
+            obstacles=nc_sim_obstacles,
+            rho=nc_sim_rho,
+            axon_length=nc_sim_axon_length,
+            num_clusters=num_clusters,
+            weight_params=weight_params,
+            use_h_current=use_h_current,
+            background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
+        )
+    elif network_source == "clustered":
+        neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
+            num_clusters=num_clusters,
+            neurons_per_cluster_range=neurons_per_cluster_range,
+            inhibitory_probability=inhibitory_probability,
+            within_cluster_prob=within_cluster_prob,
+            between_cluster_prob=between_cluster_prob,
+            max_connection_distance=max_connection_distance,
+            weight_params=weight_params,
+            space_size=space_size,
+            hub_fraction=hub_fraction,
+            hub_between_prob=hub_between_prob,
+            hub_weight_scale=hub_weight_scale,
+            hub_reciprocal_factor=hub_reciprocal_factor,
+            use_h_current=use_h_current,
+            background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
+        )
+    else:
+        raise ValueError(
+            f"Unknown network_source={network_source!r}; expected 'clustered' or 'nc_sim'"
+        )
     if stimulation_enabled:
         actual_background_noise_sigma = float(background_noise_sigma)
         baseline_currents = [neuron.i_baseline for neuron in neurons]
@@ -231,6 +285,15 @@ def sequential_simulation_individual_saves(
         "voltage_chunk_samples": int(voltage_chunk_samples) if record_voltage else None,
         "space_size": space_size,
         "max_connection_distance": max_connection_distance,
+        "network_source": network_source,
+        "nc_sim_params": {
+            "width": float(nc_sim_width),
+            "height": float(nc_sim_height),
+            "rho": float(nc_sim_rho),
+            "axon_length": float(nc_sim_axon_length),
+            "obstacles": _obstacles_to_jsonable(nc_sim_obstacles),
+            "num_clusters": int(num_clusters),
+        },
         "network_file": network_file,
         "mode": mode_label,
         "stimulation_enabled": stimulation_enabled,

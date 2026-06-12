@@ -4,6 +4,7 @@ import numpy as np
 
 from .models import LIFNeuron, NetworkWeightParameters
 from .network import assign_baseline_drive, create_clustered_network, scale_adaptation_dynamics, scale_excitatory_weights
+from .nc_sim_path import ensure_nc_sim_importable
 from .analysis import segment_states
 from .simulation import simulate_network
 
@@ -170,6 +171,12 @@ def run_no_stimulation_validation(
     voltage_window_ms=2000,
     raster_window_ms=60000,
     max_connections_plot=600,
+    network_source="clustered",
+    nc_sim_width=1.0,
+    nc_sim_height=1.0,
+    nc_sim_rho=100.0,
+    nc_sim_axon_length=1.0,
+    nc_sim_obstacles=None,
 ):
     """Simulate spontaneous activity and score whether the network stays near critical.
 
@@ -205,6 +212,16 @@ def run_no_stimulation_validation(
         voltage_window_ms: Window length in milliseconds used for quick-look voltage plots.
         raster_window_ms: Window length in milliseconds used for quick-look raster plots.
         max_connections_plot: Maximum number of sampled connections shown in layout plots.
+        network_source: Topology generator to use. ``"clustered"`` (default)
+            preserves the existing ``create_clustered_network`` behavior exactly;
+            ``"nc_sim"`` grows the topology with the nc_sim spatial axon-growth
+            model via ``build_network_from_nc_sim``. The ``nc_sim_*`` arguments are
+            ignored unless this is ``"nc_sim"``.
+        nc_sim_width: Culture width in mm passed to nc_sim growth.
+        nc_sim_height: Culture height in mm passed to nc_sim growth.
+        nc_sim_rho: Neuron density (neurons / mm^2) for nc_sim growth.
+        nc_sim_axon_length: Average axon length ``L`` in mm for nc_sim growth.
+        nc_sim_obstacles: Optional nc_sim ``H`` obstacle grid (``None`` for flat).
 
     Returns:
         A dictionary containing the generated network, recording data, and validation metrics.
@@ -219,22 +236,42 @@ def run_no_stimulation_validation(
     if baseline_drive_seed is None:
         baseline_drive_seed = seed
 
-    neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
-        num_clusters=num_clusters,
-        neurons_per_cluster_range=neurons_per_cluster_range,
-        inhibitory_probability=inhibitory_probability,
-        within_cluster_prob=within_cluster_prob,
-        between_cluster_prob=between_cluster_prob,
-        max_connection_distance=max_connection_distance,
-        weight_params=weight_params,
-        space_size=space_size,
-        hub_fraction=hub_fraction,
-        hub_between_prob=hub_between_prob,
-        hub_weight_scale=hub_weight_scale,
-        hub_reciprocal_factor=hub_reciprocal_factor,
-        use_h_current=use_h_current,
-        background_noise_sigma=0.0,
-    )
+    if network_source == "nc_sim":
+        ensure_nc_sim_importable()
+        from .nc_sim_adapter import build_network_from_nc_sim
+
+        neurons, synapses, connections, neuron_positions, cluster_info = build_network_from_nc_sim(
+            width=nc_sim_width,
+            height=nc_sim_height,
+            obstacles=nc_sim_obstacles,
+            rho=nc_sim_rho,
+            axon_length=nc_sim_axon_length,
+            num_clusters=num_clusters,
+            weight_params=weight_params,
+            use_h_current=use_h_current,
+            background_noise_sigma=0.0,
+        )
+    elif network_source == "clustered":
+        neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
+            num_clusters=num_clusters,
+            neurons_per_cluster_range=neurons_per_cluster_range,
+            inhibitory_probability=inhibitory_probability,
+            within_cluster_prob=within_cluster_prob,
+            between_cluster_prob=between_cluster_prob,
+            max_connection_distance=max_connection_distance,
+            weight_params=weight_params,
+            space_size=space_size,
+            hub_fraction=hub_fraction,
+            hub_between_prob=hub_between_prob,
+            hub_weight_scale=hub_weight_scale,
+            hub_reciprocal_factor=hub_reciprocal_factor,
+            use_h_current=use_h_current,
+            background_noise_sigma=0.0,
+        )
+    else:
+        raise ValueError(
+            f"Unknown network_source={network_source!r}; expected 'clustered' or 'nc_sim'"
+        )
 
     for neuron in neurons:
         neuron.noise_sigma = noise_sigma
@@ -350,6 +387,12 @@ def run_no_stimulation_validation(
 
     metrics = {
         "use_h_current": bool(use_h_current),
+        "network_source": network_source,
+        "nc_sim_width": float(nc_sim_width),
+        "nc_sim_height": float(nc_sim_height),
+        "nc_sim_rho": float(nc_sim_rho),
+        "nc_sim_axon_length": float(nc_sim_axon_length),
+        "nc_sim_obstacles_provided": nc_sim_obstacles is not None,
         "external_stimulation_events": len(stimulation_events),
         "test_duration_s": duration_s,
         "requested_voltage_sample_rate_ms": float(requested_voltage_sample_rate),

@@ -10,6 +10,7 @@ learned_lif_outputs/
 perceptron_outputs/
 voltage_augmented_learned_lif_outputs/
 voltage_connectivity_outputs/
+nc_sim_topology_demo_outputs/
 
 LIF_Simulation_Learned_LIF_Presentation.pptx
 network spikes (resampled ata 20Hz).png
