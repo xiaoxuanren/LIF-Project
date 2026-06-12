@@ -61,6 +61,7 @@ from __future__ import annotations
 import numpy as np
 
 from .models import ExpSynapse, LIFNeuron, NetworkWeightParameters
+from .depressing_synapse import DepressingExpSynapse
 from .network import get_connection_weight
 
 
@@ -147,6 +148,9 @@ def build_network_from_nc_sim(
     num_clusters=20,
     use_h_current=True,
     background_noise_sigma=0.0,
+    depressing=False,
+    tau_q=4000.0,
+    delta_q=0.8,
     seed=None,
     verbose=True,
 ):
@@ -256,7 +260,13 @@ def build_network_from_nc_sim(
             inh,
             weight_params,
         )
-        synapses.append(ExpSynapse(pre, neurons[post], weight, inh))
+        synapse = (
+            DepressingExpSynapse(pre, neurons[post], weight, inh,
+                                 tau_q=tau_q, delta_q=delta_q)
+            if depressing else
+            ExpSynapse(pre, neurons[post], weight, inh)
+        )
+        synapses.append(synapse)
         connections.append([pre, post, weight, "inh" if inh else "exc"])
 
     connections = np.array(connections, dtype=object)

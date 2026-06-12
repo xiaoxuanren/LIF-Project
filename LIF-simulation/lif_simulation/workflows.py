@@ -69,6 +69,9 @@ def sequential_simulation_individual_saves(
     nc_sim_rho=100.0,
     nc_sim_axon_length=1.0,
     nc_sim_obstacles=None,
+    depressing=False,
+    tau_q=4000.0,
+    delta_q=0.8,
 ):
     """Run a multi-recording simulation session and save each trial to disk.
 
@@ -124,6 +127,12 @@ def sequential_simulation_individual_saves(
             burst-synchrony dial for nc_sim growth.
         nc_sim_obstacles: Optional nc_sim ``H`` obstacle grid (``None`` for a flat
             isotropic culture).
+        depressing: When ``True`` build short-term-depressing synapses
+            (``DepressingExpSynapse``) for whichever ``network_source`` is used.
+            Default ``False`` preserves the existing non-depressing behaviour.
+        tau_q: Resource-recovery time constant (ms) for depressing synapses.
+        delta_q: Per-spike resource-depletion fraction (in [0, 1)) for depressing
+            synapses.
 
     Returns:
         A session metadata dictionary describing the generated network and recordings.
@@ -199,6 +208,9 @@ def sequential_simulation_individual_saves(
             weight_params=weight_params,
             use_h_current=use_h_current,
             background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
+            depressing=depressing,
+            tau_q=tau_q,
+            delta_q=delta_q,
         )
     elif network_source == "clustered":
         neurons, synapses, connections, neuron_positions, cluster_info = create_clustered_network(
@@ -216,6 +228,9 @@ def sequential_simulation_individual_saves(
             hub_reciprocal_factor=hub_reciprocal_factor,
             use_h_current=use_h_current,
             background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
+            depressing=depressing,
+            tau_q=tau_q,
+            delta_q=delta_q,
         )
     else:
         raise ValueError(
@@ -294,6 +309,12 @@ def sequential_simulation_individual_saves(
             "obstacles": _obstacles_to_jsonable(nc_sim_obstacles),
             "num_clusters": int(num_clusters),
         },
+        "depressing": bool(depressing),
+        "depression_params": {
+            "tau_q": float(tau_q),
+            "delta_q": float(delta_q),
+        } if depressing else None,
+        "synapse_depression_model": "resource_depletion" if depressing else "none",
         "network_file": network_file,
         "mode": mode_label,
         "stimulation_enabled": stimulation_enabled,

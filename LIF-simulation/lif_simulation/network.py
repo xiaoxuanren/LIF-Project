@@ -1,6 +1,7 @@
 import numpy as np
 
 from .models import ExpSynapse, LIFNeuron, NetworkWeightParameters
+from .depressing_synapse import DepressingExpSynapse
 
 
 def generate_non_overlapping_cluster_positions(num_clusters, cluster_radius, space_size=50):
@@ -194,6 +195,9 @@ def add_hub_connections(
     hub_between_prob=0.4,
     hub_weight_scale=1.5,
     hub_reciprocal_factor=2.0,
+    depressing=False,
+    tau_q=4000.0,
+    delta_q=0.8,
 ):
     """Add extra long-range inter-cluster connections from designated hub neurons.
 
@@ -213,6 +217,11 @@ def add_hub_connections(
         hub_weight_scale: Multiplicative factor applied to hub-originating weights.
         hub_reciprocal_factor: Extra probability multiplier used when the target is
             also a hub.
+        depressing: When ``True`` build ``DepressingExpSynapse`` (short-term
+            depression) instead of ``ExpSynapse``. Default ``False`` preserves the
+            existing behaviour exactly.
+        tau_q: Resource-recovery time constant (ms) for depressing synapses.
+        delta_q: Per-spike resource-depletion fraction for depressing synapses.
 
     Returns:
         A list of the newly created hub-connection records that were appended to
@@ -256,12 +265,22 @@ def add_hub_connections(
                     weight = base_weight * hub_weight_scale
 
                     target_neuron = neurons[target_id]
-                    synapse = ExpSynapse(
-                        hub_id,
-                        target_neuron,
-                        weight,
-                        hub_neuron.is_inhibitory,
-                    )
+                    if depressing:
+                        synapse = DepressingExpSynapse(
+                            hub_id,
+                            target_neuron,
+                            weight,
+                            hub_neuron.is_inhibitory,
+                            tau_q=tau_q,
+                            delta_q=delta_q,
+                        )
+                    else:
+                        synapse = ExpSynapse(
+                            hub_id,
+                            target_neuron,
+                            weight,
+                            hub_neuron.is_inhibitory,
+                        )
                     synapses.append(synapse)
 
                     conn_type = "inh" if hub_neuron.is_inhibitory else "exc"
@@ -397,6 +416,9 @@ def create_clustered_network(
     hub_reciprocal_factor=2.0,
     use_h_current=True,
     background_noise_sigma=0.0,
+    depressing=False,
+    tau_q=4000.0,
+    delta_q=0.8,
 ):
     """Build the clustered conductance-based network used by the simulation pipeline.
 
@@ -417,6 +439,13 @@ def create_clustered_network(
         use_h_current: Whether newly created neurons should update the h-current.
         background_noise_sigma: Standard deviation of the additive membrane-noise
             term assigned to each created neuron.
+        depressing: When ``True`` build ``DepressingExpSynapse`` (short-term
+            synaptic depression) at every synapse, including hub edges, instead of
+            ``ExpSynapse``. Default ``False`` preserves the existing behaviour
+            exactly (a rested depressing synapse is identical to ``ExpSynapse``).
+        tau_q: Resource-recovery time constant (ms) for depressing synapses.
+        delta_q: Per-spike resource-depletion fraction (in [0, 1)) for depressing
+            synapses.
 
     Returns:
         Neurons, synapses, connection table, neuron positions, and cluster metadata.
@@ -499,12 +528,22 @@ def create_clustered_network(
                     pre_neuron.is_inhibitory,
                     weight_params,
                 )
-                synapse = ExpSynapse(
-                    pre_id,
-                    post_neuron,
-                    weight,
-                    pre_neuron.is_inhibitory,
-                )
+                if depressing:
+                    synapse = DepressingExpSynapse(
+                        pre_id,
+                        post_neuron,
+                        weight,
+                        pre_neuron.is_inhibitory,
+                        tau_q=tau_q,
+                        delta_q=delta_q,
+                    )
+                else:
+                    synapse = ExpSynapse(
+                        pre_id,
+                        post_neuron,
+                        weight,
+                        pre_neuron.is_inhibitory,
+                    )
                 synapses.append(synapse)
 
                 conn_type = "inh" if pre_neuron.is_inhibitory else "exc"
@@ -544,6 +583,9 @@ def create_clustered_network(
         hub_between_prob=hub_between_prob,
         hub_weight_scale=hub_weight_scale,
         hub_reciprocal_factor=hub_reciprocal_factor,
+        depressing=depressing,
+        tau_q=tau_q,
+        delta_q=delta_q,
     )
 
     print(f"Added {len(hub_connections)} hub connections")
