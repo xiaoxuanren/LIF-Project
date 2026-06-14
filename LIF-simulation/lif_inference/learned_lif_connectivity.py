@@ -1782,6 +1782,16 @@ def run_pipeline(session_dir, K=100, recording_idx=0, n_epochs=100, lr=1e-3,
     )
     print(f"  Connectivity matrix saved: {conn_path}")
 
+    # Surface the prepared inputs so training-free baselines (e.g. the CCG
+    # baseline) can be benchmarked on the exact same data the learned model used.
+    # Additive only: existing keys are left untouched.
+    all_results.setdefault('spike_matrix', spike_matrix)
+    all_results.setdefault('neighbor_indices', neighbor_indices)
+    all_results.setdefault('boundaries', boundaries)
+    all_results.setdefault('excluded_bins', excluded_bins)
+    all_results.setdefault('true_binary', true_binary)
+    all_results.setdefault('neuron_ids', all_neuron_ids)
+
     return all_results, conn_matrix
 
 
