@@ -48,7 +48,6 @@ def sequential_simulation_individual_saves(
     spontaneous_baseline_sd=0.05,
     spontaneous_baseline_seed=0,
     spontaneous_baseline_distribution="lognormal",
-    spontaneous_noise_sigma=0.0,
     spontaneous_adaptation_tau_scale=3.0,
     spontaneous_adaptation_increment_scale=1.0,
     spontaneous_exc_weight_scale=0.65,
@@ -93,9 +92,8 @@ def sequential_simulation_individual_saves(
         space_size: Side length of the 2-D spatial layout.
         max_connection_distance: Maximum allowed connection distance.
         use_h_current: Whether to keep the slow h-current update path enabled.
-        background_noise_sigma: Standard deviation of the additive membrane-noise
-            term assigned to each neuron for stimulus-driven runs. Spontaneous
-            mode forces this to zero and uses frozen baseline drive instead.
+        background_noise_sigma: Per-neuron membrane-noise std, applied in both
+            stimulus-driven and spontaneous modes.
         spontaneous_baseline_mean: Mean frozen excitatory baseline current used
             when stimulation is disabled.
         spontaneous_baseline_sd: Standard deviation of the frozen baseline draw.
@@ -181,7 +179,7 @@ def sequential_simulation_individual_saves(
         print(f"Neurons per cluster: {neurons_per_cluster}")
     else:
         print("Stimulation: disabled")
-        print("Spontaneous drive: frozen excitatory baseline, membrane noise forced to 0")
+        print("Spontaneous drive: frozen excitatory baseline")
         print(
             f"Baseline mean={spontaneous_baseline_mean:.3f}, sd={spontaneous_baseline_sd:.3f}, "
             f"seed={spontaneous_baseline_seed}"
@@ -207,7 +205,7 @@ def sequential_simulation_individual_saves(
             num_clusters=num_clusters,
             weight_params=weight_params,
             use_h_current=use_h_current,
-            background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
+            background_noise_sigma=background_noise_sigma,
             depressing=depressing,
             tau_q=tau_q,
             delta_q=delta_q,
@@ -227,7 +225,7 @@ def sequential_simulation_individual_saves(
             hub_weight_scale=hub_weight_scale,
             hub_reciprocal_factor=hub_reciprocal_factor,
             use_h_current=use_h_current,
-            background_noise_sigma=background_noise_sigma if stimulation_enabled else 0.0,
+            background_noise_sigma=background_noise_sigma,
             depressing=depressing,
             tau_q=tau_q,
             delta_q=delta_q,
@@ -241,8 +239,6 @@ def sequential_simulation_individual_saves(
         baseline_currents = [neuron.i_baseline for neuron in neurons]
         exc_weight_scale = 1.0
     else:
-        for neuron in neurons:
-            neuron.noise_sigma = spontaneous_noise_sigma
         assign_baseline_drive(
             neurons,
             mean=spontaneous_baseline_mean,
@@ -257,7 +253,7 @@ def sequential_simulation_individual_saves(
             increment_scale=spontaneous_adaptation_increment_scale,
         )
         scale_excitatory_weights(synapses, spontaneous_exc_weight_scale, connections)
-        actual_background_noise_sigma = float(spontaneous_noise_sigma)
+        actual_background_noise_sigma = float(background_noise_sigma)
         baseline_currents = [neuron.i_baseline for neuron in neurons]
         exc_weight_scale = float(spontaneous_exc_weight_scale)
         cluster_info.update(
@@ -353,8 +349,11 @@ def sequential_simulation_individual_saves(
             for neuron in neurons:
                 neuron.reset_state()
             for syn in synapses:
-                syn.g_syn = 0.0
-                syn.pending_spikes = []
+                if hasattr(syn, "reset_state"):
+                    syn.reset_state()
+                else:
+                    syn.g_syn = 0.0
+                    syn.pending_spikes = []
 
             voltage_recorder = None
             voltage_sidecar_path = None

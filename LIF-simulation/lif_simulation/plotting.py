@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 
 
@@ -824,5 +825,215 @@ def plot_hub_firing_rate_histogram(rate_groups):
     ax.set_ylabel("Count", fontsize=12)
     ax.set_title("Firing Rate: Hub vs Non-Hub Neurons", fontsize=13)
     ax.legend(fontsize=11)
+    plt.tight_layout()
+    return fig
+
+
+# net900-style network-figure palette (shared by the four panel plotters below)
+_NET900_EXC = "#3b6fb0"
+_NET900_INH = "#c0392b"
+_NET900_HIGHLIGHT = "#13b955"
+_NET900_INDEG = "#2c7fb8"
+_NET900_OUTDEG = "#d95f0e"
+_NET900_LENGTH = "#5e3c99"
+
+
+def plot_spatial_connectivity(neuron_positions, connections, highlight_neuron=None,
+                              edge_alpha_exc=0.14, edge_alpha_inh=0.28, figsize=(8, 8)):
+    """Plot the spatial network layout with one neuron's full axonal output.
+
+    Renders panel A of the net900-style network figure: every synapse is drawn as
+    a distance-spanning line segment (excitatory and inhibitory colored
+    separately), all neurons are scattered on top, and a single chosen neuron's
+    outgoing axonal projections are highlighted.
+
+    Args:
+        neuron_positions: ``(N, 2)`` array of neuron coordinates in mm.
+        connections: Connection table whose rows are
+            ``[pre_id, post_id, weight, conn_type]`` with ``conn_type`` in
+            ``{'exc', 'inh'}``.
+        highlight_neuron: Optional neuron id whose outgoing connections are drawn
+            in the highlight color. When ``None`` a well-connected, central,
+            excitatory neuron is chosen automatically.
+        edge_alpha_exc: Opacity of excitatory edge segments.
+        edge_alpha_inh: Opacity of inhibitory edge segments.
+        figsize: Figure size in inches.
+
+    Returns:
+        The created Matplotlib figure.
+    """
+    pos = np.asarray(neuron_positions, dtype=float)
+    connections = np.asarray(connections, dtype=object)
+    pre = connections[:, 0].astype(int)
+    post = connections[:, 1].astype(int)
+    conn_type = connections[:, 3].astype(str)
+    N = len(pos)
+
+    # A neuron is inhibitory iff it sources at least one inhibitory connection.
+    is_inh = np.zeros(N, dtype=bool)
+    is_inh[np.unique(pre[conn_type == "inh"])] = True
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    exc_mask = conn_type == "exc"
+    inh_mask = conn_type == "inh"
+    if np.any(exc_mask):
+        segments_exc = np.stack([pos[pre[exc_mask]], pos[post[exc_mask]]], axis=1)
+        ax.add_collection(LineCollection(segments_exc, colors=_NET900_EXC,
+                                         linewidths=0.3, alpha=edge_alpha_exc))
+    if np.any(inh_mask):
+        segments_inh = np.stack([pos[pre[inh_mask]], pos[post[inh_mask]]], axis=1)
+        ax.add_collection(LineCollection(segments_inh, colors=_NET900_INH,
+                                         linewidths=0.35, alpha=edge_alpha_inh))
+
+    out_degree = np.bincount(pre, minlength=N)
+    if highlight_neuron is None:
+        center = (pos.min(0) + pos.max(0)) / 2
+        extent = (pos.max(0) - pos.min(0)).max()
+        near = np.where((np.linalg.norm(pos - center, axis=1) < 0.15 * extent) & (~is_inh)
+                        & (out_degree > np.percentile(out_degree, 75)))[0]
+        hub = near[np.argmax(out_degree[near])] if len(near) else int(np.argmax(out_degree))
+    else:
+        hub = int(highlight_neuron)
+
+    targets = post[pre == hub]
+    if len(targets):
+        hub_starts = np.repeat(pos[hub][None, :], len(targets), axis=0)
+        segments_hub = np.stack([hub_starts, pos[targets]], axis=1)
+        ax.add_collection(LineCollection(segments_hub, colors=_NET900_HIGHLIGHT,
+                                         linewidths=0.8, alpha=0.95, zorder=4))
+
+    exc_neurons = ~is_inh
+    n_exc = int(exc_neurons.sum())
+    n_inh = int(is_inh.sum())
+    ax.scatter(pos[exc_neurons, 0], pos[exc_neurons, 1], s=5, c=_NET900_EXC,
+               alpha=0.85, linewidths=0, label=f"excitatory ({n_exc})")
+    ax.scatter(pos[is_inh, 0], pos[is_inh, 1], s=7, c=_NET900_INH,
+               alpha=0.9, linewidths=0, label=f"inhibitory ({n_inh})")
+    ax.scatter(*pos[hub], s=70, facecolors="none", edgecolors=_NET900_HIGHLIGHT,
+               linewidths=1.6, zorder=5)
+
+    ax.set_aspect("equal")
+    x_margin = 0.02 * (pos[:, 0].max() - pos[:, 0].min())
+    y_margin = 0.02 * (pos[:, 1].max() - pos[:, 1].min())
+    ax.set_xlim(pos[:, 0].min() - x_margin, pos[:, 0].max() + x_margin)
+    ax.set_ylim(pos[:, 1].min() - y_margin, pos[:, 1].max() + y_margin)
+    ax.set_xlabel("x (mm)")
+    ax.set_ylabel("y (mm)")
+    ax.legend(loc="upper right")
+    ax.text(0.02, 0.02, "green = one neuron's full axonal output",
+            color=_NET900_HIGHLIGHT, fontweight="bold", transform=ax.transAxes)
+    plt.tight_layout()
+    return fig
+
+
+def plot_position_sorted_adjacency(neuron_positions, connections, figsize=(8, 8)):
+    """Plot the x-position-sorted adjacency scatter (net900 panel B).
+
+    Neurons are ranked by x coordinate and each synapse is plotted at
+    ``(rank[pre], rank[post])``; distance-dependent wiring appears as a band
+    around the diagonal.
+
+    Args:
+        neuron_positions: ``(N, 2)`` array of neuron coordinates in mm.
+        connections: Connection table whose rows are
+            ``[pre_id, post_id, weight, conn_type]`` with ``conn_type`` in
+            ``{'exc', 'inh'}``.
+        figsize: Figure size in inches.
+
+    Returns:
+        The created Matplotlib figure.
+    """
+    pos = np.asarray(neuron_positions, dtype=float)
+    connections = np.asarray(connections, dtype=object)
+    pre = connections[:, 0].astype(int)
+    post = connections[:, 1].astype(int)
+    conn_type = connections[:, 3].astype(str)
+    N = len(pos)
+
+    order = np.argsort(pos[:, 0])
+    rank = np.empty(N, dtype=int)
+    rank[order] = np.arange(N)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    exc_mask = conn_type == "exc"
+    inh_mask = conn_type == "inh"
+    ax.scatter(rank[pre[exc_mask]], rank[post[exc_mask]], s=1.4, c=_NET900_EXC,
+               alpha=0.5, linewidths=0)
+    ax.scatter(rank[pre[inh_mask]], rank[post[inh_mask]], s=1.8, c=_NET900_INH,
+               alpha=0.65, linewidths=0)
+
+    ax.set_xlim(0, N)
+    ax.set_ylim(N, 0)
+    ax.set_aspect("equal")
+    ax.set_xlabel("presynaptic neuron (sorted by x position)")
+    ax.set_ylabel("postsynaptic neuron")
+    plt.tight_layout()
+    return fig
+
+
+def plot_degree_distributions(connections, n_neurons=None, figsize=(8, 6)):
+    """Plot in- and out-degree synaptic distributions (net900 panel C).
+
+    Args:
+        connections: Connection table whose rows are
+            ``[pre_id, post_id, weight, conn_type]``.
+        n_neurons: Total neuron count. When ``None`` it is inferred as one past
+            the largest neuron id appearing in the connection table.
+        figsize: Figure size in inches.
+
+    Returns:
+        The created Matplotlib figure.
+    """
+    connections = np.asarray(connections, dtype=object)
+    pre = connections[:, 0].astype(int)
+    post = connections[:, 1].astype(int)
+    N = n_neurons or int(max(pre.max(), post.max())) + 1
+
+    indeg = np.bincount(post, minlength=N)
+    outdeg = np.bincount(pre, minlength=N)
+    bins = np.arange(0, max(indeg.max(), outdeg.max()) + 2)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.hist(indeg, bins=bins, alpha=0.6, color=_NET900_INDEG,
+            label=f"in-degree (mean {indeg.mean():.1f})")
+    ax.hist(outdeg, bins=bins, alpha=0.55, color=_NET900_OUTDEG,
+            label=f"out-degree (mean {outdeg.mean():.1f})")
+    ax.set_xlabel("synaptic degree")
+    ax.set_ylabel("number of neurons")
+    ax.legend()
+    plt.tight_layout()
+    return fig
+
+
+def plot_connection_length_distribution(neuron_positions, connections, bins=60, figsize=(8, 6)):
+    """Plot the distribution of Euclidean connection lengths (net900 panel D).
+
+    Args:
+        neuron_positions: ``(N, 2)`` array of neuron coordinates in mm.
+        connections: Connection table whose rows are
+            ``[pre_id, post_id, weight, conn_type]``.
+        bins: Number of histogram bins.
+        figsize: Figure size in inches.
+
+    Returns:
+        The created Matplotlib figure.
+    """
+    pos = np.asarray(neuron_positions, dtype=float)
+    connections = np.asarray(connections, dtype=object)
+    pre = connections[:, 0].astype(int)
+    post = connections[:, 1].astype(int)
+
+    lengths = np.linalg.norm(pos[pre] - pos[post], axis=1)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.hist(lengths, bins=bins, color=_NET900_LENGTH, alpha=0.8)
+    ax.axvline(lengths.mean(), color="k", ls="--", lw=1.2,
+               label=f"mean {lengths.mean():.2f} mm")
+    ax.axvline(np.median(lengths), color="#888", ls=":", lw=1.2,
+               label=f"median {np.median(lengths):.2f} mm")
+    ax.set_xlabel("connection length (mm)")
+    ax.set_ylabel("number of synapses")
+    ax.legend()
     plt.tight_layout()
     return fig
