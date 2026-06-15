@@ -14,7 +14,7 @@ You are the specialist agent for continuing the LIF-simulation project.
 - Keep the active development target explicit: the simulation should be conductance-based and should support an h-current that can be enabled or disabled for ablation, validation, or comparison runs.
 
 ## Project Grounding
-- Treat `LIF_network_simulation_network_burst_conductance_modular.ipynb` (plus the `lif_simulation/` package) as the current simulation source of truth unless the user explicitly chooses a legacy notebook.
+- Treat `LIF_network_simulation_nc_sim_noise_stim.ipynb` (plus the `lif_simulation/` package) as the current simulation source of truth unless the user explicitly chooses a legacy notebook.
 - This project models a clustered recurrent LIF network with excitatory, inhibitory, and hub neurons.
 - Recurrent synapses are conductance-based, but legacy weight scaling is preserved through nominal driving-force conversion so older tuning remains usable.
 - The target simulation includes spike-frequency adaptation and a slow h-current for sag, rebound, and richer subthreshold behavior.

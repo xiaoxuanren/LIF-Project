@@ -8,7 +8,7 @@ The main simulation surface is a conductance-based LIF notebook with a slow hype
 
 - `lif_simulation/` — Shared simulation package extracted from the conductance notebook. Contains the model, network creation, stimulation, simulation loop, save/load helpers, analysis, hub validation, and plotting code.
 - `lif_inference/` — Shared inference package for the spike-only and voltage-augmented learned-LIF connectivity pipelines.
-- `LIF_network_simulation_network_burst_conductance_modular.ipynb` — Import-based orchestration notebook for the modular package.
+- `LIF_network_simulation_nc_sim_noise_stim.ipynb` — Import-based orchestration notebook (nc_sim spatial topology, noise + stimulus-driven).
 - `learned_lif_connectivity_modular.ipynb` — Import-based orchestration notebook for the learned-LIF inference package.
 - `scripts/` — CLI helpers for validation, saved simulation runs, saved-session plotting, ablation comparison, raw-voltage inspection, and voltage-lambda sweeps.
 - `docs/` — Reference notes moved out of the root workflow surface.
@@ -29,7 +29,7 @@ For a longer supported-only script reference, see `docs/SCRIPT_DETAILS.md`.
 If you are opening this repository for the first time, use this order:
 
 1. Set up the environment and confirm the package imports work.
-2. Open `LIF_network_simulation_network_burst_conductance_modular.ipynb`.
+2. Open `LIF_network_simulation_nc_sim_noise_stim.ipynb`.
 3. Run the validation and h-current probe cells before running a long saved simulation.
 4. Enable `execute_main_simulation = True` only when the validation outputs look correct.
 5. After a session is saved under `LIF data/<timestamp>`, inspect it with `python -m scripts.plot_saved_session latest` or the later notebook cells.
@@ -53,7 +53,7 @@ pip install h5py
 Recommended modular workflow:
 
 ```text
-LIF_network_simulation_network_burst_conductance_modular.ipynb
+LIF_network_simulation_nc_sim_noise_stim.ipynb
 ```
 
 or run the thin scripts directly:
@@ -129,7 +129,7 @@ Reference-only markdown notes have been moved under `docs/` so the repository ro
 - `lif_simulation/` — Modular simulation package extracted from the conductance notebook
 - `lif_inference/` — Modular learned-LIF inference package
 - `scripts/` — CLI helpers and utilities for simulation validation, saved-session analysis, raw-voltage inspection, ablation comparison, and voltage-lambda sweeps
-- `LIF_network_simulation_network_burst_conductance_modular.ipynb` — Import-based modular notebook entry point
+- `LIF_network_simulation_nc_sim_noise_stim.ipynb` — Import-based simulation notebook entry point (nc_sim topology, noise + stim)
 - `learned_lif_connectivity_modular.ipynb` — Import-based learned-LIF inference notebook
 - `scripts/run_no_stim_validation.py` — Standalone near-criticality validation
 - `scripts/run_h_current_sag_probe.py` — Standalone h-current sag/rebound probe

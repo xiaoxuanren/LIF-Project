@@ -10,7 +10,7 @@ Out-of-scope GNN, classical baseline, presentation, scratch, and legacy helper m
 lif_simulation/                                    Shared simulation package
 lif_inference/                                     Shared learned-LIF inference package
 scripts/                                           CLI helpers and analysis utilities
-LIF_network_simulation_network_burst_conductance_modular.ipynb  Recommended modular simulation notebook
+LIF_network_simulation_nc_sim_noise_stim.ipynb  Recommended simulation notebook (nc_sim topology, noise + stim)
 learned_lif_connectivity_modular.ipynb                          Recommended modular learned-LIF notebook
 scripts/run_conductance_simulation.py              Thin CLI for simulation runs
 scripts/run_no_stim_validation.py                  Thin CLI for spontaneous-activity validation
@@ -35,7 +35,7 @@ docs/                                              Reference-only project notes 
 
 Recommended notebook path:
 
-- `LIF_network_simulation_network_burst_conductance_modular.ipynb`
+- `LIF_network_simulation_nc_sim_noise_stim.ipynb`
 
 Equivalent CLI entry points:
 
