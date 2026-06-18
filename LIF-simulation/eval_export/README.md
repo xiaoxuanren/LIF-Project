@@ -72,6 +72,17 @@ Matrices (all `[post, pre]`, shape `461×461`) and flattened per-edge arrays (le
 | `flat_signed_voltage` | (46100,) | voltage signed score (`abs` of this == `scores`) |
 | `flat_signed_spikeonly` | (46100,) | spike-only signed score |
 
+### `ccg_score_matrix_20260523_084407.npy`
+
+Full **461×461 `[post, pre]`** CCG-baseline score matrix, same neuron ordering / index
+convention as the npz above. Raw **excitatory-coincidence excess** (positive = excess,
+negative = below-baseline deficit; non-candidate pairs are 0). CCG assigns **no E/I sign**
+(the pipeline detects on `|score|`), so this is the only CCG file — values are kept signed
+(excess), not abs'd. Load: `np.load("ccg_score_matrix_20260523_084407.npy")` and plot next to
+`conn_signed_voltage` / `true_W_signed`. Ordering verified: `|CCG|` vs `true_binary` AUC ≈ 0.72;
+median `|CCG|` at true-excitatory edges (0.012) ≫ non-edges (0.0025) and ≈ 0 at inhibitory edges
+(CCG is excitatory-only). Min/max ≈ −0.617 / 0.328, 33,555 nonzero.
+
 ### `per_edge_scores_voltage_all20.csv`
 
 Same flattened table, human-readable: `post, pre, label, true_sign, pre_is_inh,
