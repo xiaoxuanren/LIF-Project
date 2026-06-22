@@ -7,7 +7,10 @@ from torch.utils.data import DataLoader
 from .connectivity_metrics import flatten_candidate_scores
 from .event_training import evaluate_event_windows, train_epoch_events
 from .event_windows import build_train_val_event_datasets
-from .shared_data import build_segmentwise_circular_shift_surrogates
+from .shared_data import (
+    build_interval_jitter_surrogates,
+    build_segmentwise_circular_shift_surrogates,
+)
 
 
 def estimate_surrogate_connectivity_score_sets(
@@ -19,19 +22,39 @@ def estimate_surrogate_connectivity_score_sets(
         boundaries=None, excluded_bins=None, val_fraction=0.2,
         device='cpu', n_surrogates=4, surrogate_epochs=2,
         surrogate_patience=1, surrogate_min_shift_fraction=0.10,
-        surrogate_seed=1234):
-    """Fit lightweight spike-only null models on circular-shift surrogates."""
+        surrogate_seed=1234, surrogate_null='circular_shift', jitter_bins=25):
+    """Fit lightweight spike-only null models on surrogate spike trains.
+
+    ``surrogate_null`` selects the null: ``'circular_shift'`` (default) rotates
+    each neuron rigidly within a recording; ``'interval_jitter'`` resamples each
+    spike within a ``jitter_bins``-wide window, preserving coarse common-input
+    co-activation.
+    """
+    surrogate_null = str(surrogate_null).strip().lower()
+    if surrogate_null not in {'circular_shift', 'interval_jitter'}:
+        raise ValueError(
+            f"Unsupported surrogate_null={surrogate_null!r}; "
+            "use 'circular_shift' or 'interval_jitter'"
+        )
     rng = np.random.default_rng(surrogate_seed)
     all_neuron_ids = np.arange(n_neurons)
     score_sets = []
 
     for surrogate_idx in range(int(n_surrogates)):
-        surrogate_spike_matrix, = build_segmentwise_circular_shift_surrogates(
-            [spike_matrix],
-            boundaries=boundaries,
-            rng=rng,
-            min_shift_fraction=surrogate_min_shift_fraction,
-        )
+        if surrogate_null == 'interval_jitter':
+            surrogate_spike_matrix, = build_interval_jitter_surrogates(
+                [spike_matrix],
+                boundaries=boundaries,
+                rng=rng,
+                jitter_bins=jitter_bins,
+            )
+        else:
+            surrogate_spike_matrix, = build_segmentwise_circular_shift_surrogates(
+                [spike_matrix],
+                boundaries=boundaries,
+                rng=rng,
+                min_shift_fraction=surrogate_min_shift_fraction,
+            )
         dataset_seed = surrogate_seed + 1000 * (surrogate_idx + 1)
         train_ds, val_ds, _ = build_train_val_event_datasets(
             surrogate_spike_matrix, neighbor_indices, all_neuron_ids,
