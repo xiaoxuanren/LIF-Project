@@ -17,8 +17,15 @@ network spikes (resampled ata 20Hz).png
 output.png
 raster_plot.png
 presentation_oral_script.docx
-presentation_assets/qa_exports/
-presentation_assets/slide_exports/
+presentation_assets/
+
+# matched-pair ablation + h-current/potassium session outputs (regenerable)
+h_current_ablation_data/
+h_current_ablation_results/
+
+# transient run logs and intermediate session artifacts
+*.log
+ccg_scores_*.npz
 
 .ipynb_checkpoints/
 *.pyc

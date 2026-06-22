@@ -23,6 +23,7 @@ The current primary simulation surface is the conductance-based notebook with a 
 - `lif_inference/learned_lif_connectivity.py` — Packaged spike-only learned-LIF CLI module.
 - `lif_inference/voltage_augmented_learned_lif_connectivity.py` — Packaged voltage-augmented learned-LIF CLI module. In addition to the legacy event-window path, it now exposes opt-in per-neuron surrogate-FDR thresholding, reduced intrinsic slow states, and continuous-state chunk training.
 - `scripts/run_voltage_lambda_sweep.py` — Sweep helper for voltage-augmented learned-LIF runs.
+- `scripts/run_jitter_sweep.py` — Tune the interval-jitter surrogate window (`jitter_bins`) for the surrogate-FDR null on a saved sim session.
 
 ### Documentation
 - `README.md` — Public repo landing-page overview.
@@ -117,6 +118,8 @@ Run the sag/rebound probe cell in the conductance notebook to compare the same n
 - Voltage-augmented learned-LIF: `python -m lif_inference.voltage_augmented_learned_lif_connectivity`
 - For real-data-style non-leaky thresholding in the voltage path, prefer `--connectivity-threshold-mode surrogate_fdr` or the row-calibrated `--connectivity-threshold-mode surrogate_fdr_per_neuron`; `oracle_f1` remains a retrospective simulated-data benchmark.
 - Use `--slow-state-mode adaptation_h` to add reduced adaptation and h-like intrinsic states to the inference LIF, and `--training-mode continuous_state` when you want those states carried across ordered recording chunks rather than reset for every event window.
+- For the surrogate-FDR null, prefer `--surrogate-null interval_jitter --jitter-bins 10` with `surrogate_epochs` matched to the observed model on voltage runs: the default circular-shift null destroys population common input and under-calibrates the voltage model's false-positive floor, collapsing surrogate-threshold precision even when AUC/AP are strong; interval jitter resamples spikes within the jitter window, preserving common input above it while destroying monosynaptic timing below it. Tune the window with `python -m scripts.run_jitter_sweep --session "LIF data/<timestamp>" --jitter-bins-list 10,12,14,16,20,25 --target-fdr <reachable>` (reports per-window *power*, *calibration*, and true precision/recall/FDR; pick the smallest full-collapse window).
+- Characterized limitation (do not call the threshold "fixed"): on the voltage model the unsupervised cutoff does not reach the oracle frontier (0.89 precision / 0.61 recall at 11% true-FDR, sim-only). The ranking is strong and unchanged (AUC 0.916), but `power` (edge-collapse) and `calibration` (FP-floor match) trade off and cannot both hold — the null keeps the real voltage to preserve common input, but the real voltage also carries the connectivity signal, so common input and edges are inseparable in voltage. The lever to improve is the model/ranking (sparsity, conductance inhibition), not the threshold. See `docs/surrogate_calibration_summary.md`. Global defaults (`circular_shift`, `surrogate_epochs=1`) are unchanged.
 
 ### Archived Materials
 Out-of-scope GNN, baseline, presentation, scratch, and legacy notebook files have been removed from this cleaned repo snapshot.

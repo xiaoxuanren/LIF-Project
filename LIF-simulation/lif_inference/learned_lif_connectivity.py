@@ -894,7 +894,7 @@ def estimate_surrogate_connectivity_score_sets(
         boundaries=None, excluded_bins=None, val_fraction=0.2,
         device='cpu', n_surrogates=4, surrogate_epochs=2,
         surrogate_patience=1, surrogate_min_shift_fraction=0.10,
-        surrogate_seed=1234):
+        surrogate_seed=1234, surrogate_null='circular_shift', jitter_bins=25):
     return shared_estimate_surrogate_connectivity_score_sets(
         PerNeuronLIF,
         spike_matrix,
@@ -921,6 +921,8 @@ def estimate_surrogate_connectivity_score_sets(
         surrogate_patience=surrogate_patience,
         surrogate_min_shift_fraction=surrogate_min_shift_fraction,
         surrogate_seed=surrogate_seed,
+        surrogate_null=surrogate_null,
+        jitter_bins=jitter_bins,
     )
 
 
@@ -1261,6 +1263,8 @@ def run_pipeline(session_dir, K=100, recording_idx=0, n_epochs=100, lr=1e-3,
                  surrogate_patience=1,
                  surrogate_min_shift_fraction=0.10,
                  surrogate_seed=1234,
+                 surrogate_null='circular_shift',
+                 jitter_bins=25,
                  exclude_detected_bursts=True,
                  burst_activity_bin_ms=100.0,
                  burst_smooth_bins=3,
@@ -1579,7 +1583,7 @@ def run_pipeline(session_dir, K=100, recording_idx=0, n_epochs=100, lr=1e-3,
 
     print(
         f"\n  Calibrating non-leaky connectivity threshold with "
-        f"{n_threshold_surrogates} circular-shift surrogates "
+        f"{n_threshold_surrogates} {surrogate_null} surrogates "
         f"(target FDR={surrogate_fdr:.3f}) for surrogate-threshold output..."
     )
     surrogate_score_sets = estimate_surrogate_connectivity_score_sets(
@@ -1607,6 +1611,8 @@ def run_pipeline(session_dir, K=100, recording_idx=0, n_epochs=100, lr=1e-3,
         surrogate_patience=surrogate_patience,
         surrogate_min_shift_fraction=surrogate_min_shift_fraction,
         surrogate_seed=surrogate_seed,
+        surrogate_null=surrogate_null,
+        jitter_bins=jitter_bins,
     )
     print(
         f"  Surrogate score sets: {surrogate_score_sets.shape[0]} models x "
@@ -1876,6 +1882,15 @@ def build_parser():
                         help='Minimum circular shift size as a fraction of each recording segment')
     parser.add_argument('--surrogate-seed', type=int, default=1234,
                         help='Base random seed used for surrogate threshold calibration')
+    parser.add_argument('--surrogate-null', type=str, default='circular_shift',
+                        choices=['circular_shift', 'interval_jitter'],
+                        help='Surrogate null for threshold calibration. interval_jitter '
+                             'is recommended for voltage runs because circular shift '
+                             'under-calibrates against common input; for the spike-only '
+                             'model circular_shift is usually well calibrated.')
+    parser.add_argument('--jitter-bins', type=int, default=25,
+                        help='Window width in bins for the interval_jitter null: timing '
+                             'finer than this is destroyed, coarser co-activation preserved')
     # Event window parameters
     parser.add_argument('--pre-context', type=int, default=50,
                         help='Bins before event (causal pre input)')
@@ -1966,6 +1981,8 @@ def main(argv=None):
         surrogate_patience=args.surrogate_patience,
         surrogate_min_shift_fraction=args.surrogate_min_shift_frac,
         surrogate_seed=args.surrogate_seed,
+        surrogate_null=args.surrogate_null,
+        jitter_bins=args.jitter_bins,
         exclude_detected_bursts=args.exclude_detected_bursts,
         burst_activity_bin_ms=args.burst_activity_bin_ms,
         burst_smooth_bins=args.burst_smooth_bins,

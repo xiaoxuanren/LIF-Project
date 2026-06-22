@@ -1,0 +1,6 @@
+null,surrogate_epochs,power_edge_collapse,calibration_ratio,cutoff,true_precision,true_recall,true_FDR,FP,auc,ap,inh_auprc
+circular_shift,1,0.034,0.295,0.0539,0.125,0.920,0.875,17315,0.9158,0.7602,0.0763
+circular_shift,12,,,,,,,,0.9158,0.7602,0.0763
+interval_jitter,1,0.166,0.326,0.0830,0.176,0.896,0.824,11224,0.9158,0.7602,0.0763
+interval_jitter,12,0.752,0.952,1.0124,0.920,0.047,0.080,11,0.9158,0.7602,0.0763
+oracle_frontier_11pct,,,,0.3278,0.890,0.611,0.110,,0.9158,0.7602,0.0763

@@ -5,7 +5,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from .connectivity_metrics import flatten_candidate_scores
-from .shared_data import build_segmentwise_circular_shift_surrogates
+from .shared_data import (
+    build_interval_jitter_surrogates,
+    build_segmentwise_circular_shift_surrogates,
+)
 
 
 def estimate_surrogate_connectivity_score_sets(
@@ -19,22 +22,49 @@ def estimate_surrogate_connectivity_score_sets(
         boundaries=None, excluded_bins=None, val_fraction=0.2,
         device='cpu', n_surrogates=4, surrogate_epochs=2,
         surrogate_patience=1, surrogate_min_shift_fraction=0.10,
-        surrogate_seed=1234, model_kwargs=None):
-    """Fit lightweight null models on circular-shift spike+voltage surrogates."""
+        surrogate_seed=1234, model_kwargs=None,
+        surrogate_null='circular_shift', jitter_bins=25):
+    """Fit lightweight null models on surrogate spike+voltage data.
+
+    ``surrogate_null='circular_shift'`` (default) rigidly rotates spikes, voltage,
+    and mask together per neuron. ``'interval_jitter'`` resamples only the spike
+    trains within ``jitter_bins``-wide windows and keeps the real voltage and
+    mask: this preserves the population common-input envelope (the source of the
+    voltage model's false positives) while still destroying monosynaptic timing,
+    so the null reproduces the real FP floor instead of sitting far below it.
+    """
+    surrogate_null = str(surrogate_null).strip().lower()
+    if surrogate_null not in {'circular_shift', 'interval_jitter'}:
+        raise ValueError(
+            f"Unsupported surrogate_null={surrogate_null!r}; "
+            "use 'circular_shift' or 'interval_jitter'"
+        )
     rng = np.random.default_rng(surrogate_seed)
     all_neuron_ids = np.arange(n_neurons)
     score_sets = []
     model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
 
     for surrogate_idx in range(int(n_surrogates)):
-        surrogate_spike_matrix, surrogate_voltage_matrix, surrogate_voltage_mask = (
-            build_segmentwise_circular_shift_surrogates(
-                [spike_matrix, voltage_matrix, voltage_mask],
+        if surrogate_null == 'interval_jitter':
+            # Jitter spikes only; keep the real voltage/mask so the common-input
+            # envelope that drives false positives is preserved in the null.
+            surrogate_spike_matrix, = build_interval_jitter_surrogates(
+                [spike_matrix],
                 boundaries=boundaries,
                 rng=rng,
-                min_shift_fraction=surrogate_min_shift_fraction,
+                jitter_bins=jitter_bins,
             )
-        )
+            surrogate_voltage_matrix = voltage_matrix
+            surrogate_voltage_mask = voltage_mask
+        else:
+            surrogate_spike_matrix, surrogate_voltage_matrix, surrogate_voltage_mask = (
+                build_segmentwise_circular_shift_surrogates(
+                    [spike_matrix, voltage_matrix, voltage_mask],
+                    boundaries=boundaries,
+                    rng=rng,
+                    min_shift_fraction=surrogate_min_shift_fraction,
+                )
+            )
         dataset_seed = surrogate_seed + 1000 * (surrogate_idx + 1)
         train_ds, val_ds, _ = dataset_builder(
             surrogate_spike_matrix,

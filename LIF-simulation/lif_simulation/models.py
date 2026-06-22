@@ -76,6 +76,7 @@ class LIFNeuron:
         self.i_adapt = 0.0
 
         self.g_h_max_base = self.g_h_max
+        self.adaptation_increment_base = self.adaptation_increment
         self.h_gate = 0.0
         self.i_h = 0.0
         self.set_h_current_enabled(self.use_h_current)
@@ -109,6 +110,36 @@ class LIFNeuron:
         else:
             self.h_gate = 0.0
             self.i_h = 0.0
+
+    def set_adaptation_scale(self, scale):
+        """Scale the spike-triggered adaptation (K+ AHP) current from its baseline.
+
+        Mirrors the I_h ``g_h_max_base`` / ``set_h_current_enabled`` pattern so the
+        adaptation current can be perturbed idempotently from a stored base
+        (``scale=0`` blocks it, ``1`` = baseline), regardless of prior scaling.
+
+        Args:
+            scale: Non-negative multiplier applied to the baseline per-spike
+                adaptation increment.
+
+        Returns:
+            None. Updates ``adaptation_increment`` in place.
+        """
+        if scale < 0.0:
+            raise ValueError("adaptation scale must be >= 0")
+        self.adaptation_increment = self.adaptation_increment_base * float(scale)
+
+    def set_adaptation_enabled(self, enabled):
+        """Enable or block the spike-triggered adaptation current.
+
+        Args:
+            enabled: When ``False`` the per-spike adaptation increment is set to
+                zero (blocked); when ``True`` the baseline increment is restored.
+
+        Returns:
+            None.
+        """
+        self.set_adaptation_scale(1.0 if enabled else 0.0)
 
     def update(self, t, dt):
         """Advance the neuron state by one integration step.

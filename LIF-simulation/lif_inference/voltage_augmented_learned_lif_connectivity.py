@@ -1411,10 +1411,25 @@ def estimate_continuous_surrogate_connectivity_score_sets(
         chunk_len, pos_weight, l1_lambda, voltage_lambda, boundaries=None,
         excluded_bins=None, val_fraction=0.2, device='cpu', n_surrogates=4,
         surrogate_epochs=2, surrogate_patience=1,
-        surrogate_min_shift_fraction=0.10, surrogate_seed=1234):
-    """Fit circular-shift null models with the continuous-state training path."""
-    from .shared_data import build_segmentwise_circular_shift_surrogates
+        surrogate_min_shift_fraction=0.10, surrogate_seed=1234,
+        surrogate_null='circular_shift', jitter_bins=25):
+    """Fit null models with the continuous-state training path.
 
+    ``surrogate_null='interval_jitter'`` resamples only the spike trains within
+    ``jitter_bins`` windows and keeps the real voltage/mask (preserving common
+    input); ``'circular_shift'`` (default) rotates spikes/voltage/mask together.
+    """
+    from .shared_data import (
+        build_interval_jitter_surrogates,
+        build_segmentwise_circular_shift_surrogates,
+    )
+
+    surrogate_null = str(surrogate_null).strip().lower()
+    if surrogate_null not in {'circular_shift', 'interval_jitter'}:
+        raise ValueError(
+            f"Unsupported surrogate_null={surrogate_null!r}; "
+            "use 'circular_shift' or 'interval_jitter'"
+        )
     rng = np.random.default_rng(surrogate_seed)
     score_sets = []
     train_boundaries, val_boundaries = build_continuous_train_val_boundaries(
@@ -1425,14 +1440,21 @@ def estimate_continuous_surrogate_connectivity_score_sets(
     dummy_true_weights = np.zeros((n_neurons, n_neurons), dtype=np.float32)
 
     for surrogate_idx in range(int(n_surrogates)):
-        surrogate_spike_matrix, surrogate_voltage_matrix, surrogate_voltage_mask = (
-            build_segmentwise_circular_shift_surrogates(
-                [spike_matrix, voltage_matrix, voltage_mask],
-                boundaries=boundaries,
-                rng=rng,
-                min_shift_fraction=surrogate_min_shift_fraction,
+        if surrogate_null == 'interval_jitter':
+            surrogate_spike_matrix, = build_interval_jitter_surrogates(
+                [spike_matrix], boundaries=boundaries, rng=rng, jitter_bins=jitter_bins,
             )
-        )
+            surrogate_voltage_matrix = voltage_matrix
+            surrogate_voltage_mask = voltage_mask
+        else:
+            surrogate_spike_matrix, surrogate_voltage_matrix, surrogate_voltage_mask = (
+                build_segmentwise_circular_shift_surrogates(
+                    [spike_matrix, voltage_matrix, voltage_mask],
+                    boundaries=boundaries,
+                    rng=rng,
+                    min_shift_fraction=surrogate_min_shift_fraction,
+                )
+            )
         torch.manual_seed(surrogate_seed + surrogate_idx)
         surrogate_model = VoltageAugmentedPerNeuronLIF(
             n_neurons=n_neurons,
@@ -1469,7 +1491,8 @@ def estimate_surrogate_connectivity_score_sets(
         boundaries=None, excluded_bins=None, val_fraction=0.2,
         device='cpu', n_surrogates=4, surrogate_epochs=2,
         surrogate_patience=1, surrogate_min_shift_fraction=0.10,
-        surrogate_seed=1234, slow_state_mode='none'):
+        surrogate_seed=1234, slow_state_mode='none',
+        surrogate_null='circular_shift', jitter_bins=25):
     return shared_estimate_surrogate_connectivity_score_sets(
         VoltageAugmentedPerNeuronLIF,
         build_train_val_voltage_datasets,
@@ -1503,6 +1526,8 @@ def estimate_surrogate_connectivity_score_sets(
         surrogate_min_shift_fraction=surrogate_min_shift_fraction,
         surrogate_seed=surrogate_seed,
         model_kwargs={'slow_state_mode': slow_state_mode},
+        surrogate_null=surrogate_null,
+        jitter_bins=jitter_bins,
     )
 
 
@@ -2039,6 +2064,8 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  surrogate_patience=1,
                  surrogate_min_shift_fraction=0.10,
                  surrogate_seed=1234,
+                 surrogate_null='circular_shift',
+                 jitter_bins=25,
                  exclude_detected_bursts=False,
                  burst_activity_bin_ms=100.0,
                  burst_smooth_bins=3,
@@ -2401,7 +2428,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     if connectivity_threshold_mode in {'surrogate_fdr', 'surrogate_fdr_per_neuron'}:
         print(
             f'\n  Calibrating non-leaky connectivity threshold with '
-            f'{n_threshold_surrogates} circular-shift surrogates '
+            f'{n_threshold_surrogates} {surrogate_null} surrogates '
             f'(target FDR={surrogate_fdr:.3f})...'
         )
         if training_mode == 'continuous_state':
@@ -2430,6 +2457,8 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                 surrogate_patience=surrogate_patience,
                 surrogate_min_shift_fraction=surrogate_min_shift_fraction,
                 surrogate_seed=surrogate_seed,
+                surrogate_null=surrogate_null,
+                jitter_bins=jitter_bins,
             )
         else:
             surrogate_score_sets = estimate_surrogate_connectivity_score_sets(
@@ -2461,6 +2490,8 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                 surrogate_min_shift_fraction=surrogate_min_shift_fraction,
                 surrogate_seed=surrogate_seed,
                 slow_state_mode=slow_state_mode,
+                surrogate_null=surrogate_null,
+                jitter_bins=jitter_bins,
             )
         print(
             f'  Surrogate score sets: {surrogate_score_sets.shape[0]} models x '
@@ -2730,6 +2761,17 @@ def build_parser():
                         help='Minimum circular shift size as a fraction of each recording segment')
     parser.add_argument('--surrogate-seed', type=int, default=1234,
                         help='Base random seed used for surrogate threshold calibration')
+    parser.add_argument('--surrogate-null', type=str, default='circular_shift',
+                        choices=['circular_shift', 'interval_jitter'],
+                        help='Surrogate null for threshold calibration. interval_jitter is '
+                             'recommended for voltage runs: circular shift destroys the '
+                             'population common-input co-activation, so its null sits far '
+                             'below the real false-positive floor and the FDR cutoff '
+                             'collapses; interval_jitter preserves common input above the '
+                             'jitter window while still destroying monosynaptic timing.')
+    parser.add_argument('--jitter-bins', type=int, default=25,
+                        help='Window width in bins for the interval_jitter null: timing '
+                             'finer than this is destroyed, coarser co-activation preserved')
     parser.add_argument('--pre-context', type=int, default=50)
     parser.add_argument('--post-context', type=int, default=10)
     parser.add_argument('--warmup', type=int, default=100,
@@ -2812,6 +2854,8 @@ def main(argv=None):
         surrogate_patience=args.surrogate_patience,
         surrogate_min_shift_fraction=args.surrogate_min_shift_frac,
         surrogate_seed=args.surrogate_seed,
+        surrogate_null=args.surrogate_null,
+        jitter_bins=args.jitter_bins,
         mask_pre_ms=args.mask_pre_ms,
         mask_post_ms=args.mask_post_ms,
         peak_threshold_mv=args.peak_threshold_mv,
