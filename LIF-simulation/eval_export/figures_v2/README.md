@@ -55,9 +55,13 @@ the data, not carried over from older slides.
 ![](v2_fullnetwork_raster.png)
 *Full 461-neuron raster, 60 s, bold spikes; five stim bursts (dashed) punctuate sparse spontaneous firing — the input the inference is fit to.*
 
-### Subcluster voltage traces
+### Subcluster voltage traces — around a stimulus burst
 ![](v2_subcluster_voltage_traces.png)
 *Raw membrane voltage for example neurons spanning subclusters 0–2 (exc red / inh blue) around a stimulus burst (~11.7 s); ▼ = spikes. The subthreshold dynamics + coordinated burst spiking the voltage-augmented model is fit to.*
+
+### Subcluster voltage traces — spontaneous (inter-burst)
+![](v2_subcluster_voltage_spontaneous.png)
+*The same subcluster neurons in two inter-burst windows (3–5.5 s and 14–16.5 s, each >3 s from any stim burst). Without burst drive the cells show low-rate, irregular spontaneous spiking on noisy subthreshold fluctuations — the asynchronous between-burst regime.*
 
 ---
 
