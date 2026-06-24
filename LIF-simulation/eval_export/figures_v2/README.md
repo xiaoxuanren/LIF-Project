@@ -55,6 +55,10 @@ the data, not carried over from older slides.
 ![](v2_fullnetwork_raster.png)
 *Full 461-neuron raster, 60 s, bold spikes; five stim bursts (dashed) punctuate sparse spontaneous firing — the input the inference is fit to.*
 
+### Subcluster voltage traces
+![](v2_subcluster_voltage_traces.png)
+*Raw membrane voltage for example neurons spanning subclusters 0–2 (exc red / inh blue) around a stimulus burst (~11.7 s); ▼ = spikes. The subthreshold dynamics + coordinated burst spiking the voltage-augmented model is fit to.*
+
 ---
 
 ## 1 · Score separation
