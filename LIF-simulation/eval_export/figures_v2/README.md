@@ -114,3 +114,21 @@ the data, not carried over from older slides.
 ## 9 · Detected edges by predicted sign (full 461)
 ![](v2_detected_by_sign.png)
 *Detected edges coloured red/blue by predicted sign, spike-only and voltage, at surrogate and oracle thresholds (CCG omitted — no sign).*
+
+---
+
+## 10 · Voltage's sign-recovery advantage & detected-edge operating points
+
+### How voltage helps sign recovery
+![](v2_sign_recovery_improvement.png)
+*Left: sign-agreement among the 2,683 true edges, spike-only (hatched) vs voltage (solid). Voltage lifts **inhibitory** sign recovery 69.9 → 79.9% (**+10 pp**) and excitatory 98.9 → 99.7%. Right: true edges whose sign voltage **corrects** (spike-wrong → voltage-right) minus the reverse — net **+20 excitatory, +41 inhibitory (+61 total)**, two-thirds inhibitory. This is the mechanism behind voltage's inhibitory AUC/recall gains.*
+
+### Detected edges by correctness — oracle-F1 vs surrogate (circuits)
+![](v2_detected_circuits_by_correctness.png)
+*Subnetwork (clusters 0–2) detected edges, TP green / FP orange / FN slate, at each model's F1-optimal threshold (oracle-F1) and its unsupervised surrogate-FDR threshold. Spike-only is well-calibrated (surrogate ≈ oracle-F1: subnet TP 119/125, FP 20/26). **Voltage at its surrogate floods with false positives** — subnet FP 30 → 190 — the characterized over-selection (global FDR 0.64).*
+
+### Detected edges by correctness — oracle-F1 vs surrogate (matrices)
+![](v2_detected_matrices_by_correctness.png)
+*The same four operating points as cluster-blocked 48×48 matrices (post × pre). The voltage-surrogate panel's orange (FP) spread across off-diagonal blocks shows the over-selection the circuit view also makes visible.*
+
+> **Oracle-F1 thresholds** (F1-maximizing on the true labels): spike-only **0.186** (F1 0.750, TP 1779 / FP 284 / FN 904, rec 0.663), voltage **0.280** (F1 0.757, TP 1873 / FP 391 / FN 810, rec 0.698). These are **distinct** from the near-zero-FDR "oracle" of §8 (0.446 / 1.481). At oracle-F1 voltage detects more true edges at higher recall; the gap blows up only at the voltage **surrogate** (global FP 4,111, FDR 0.64), while the spike surrogate sits essentially at its own oracle-F1 (0.193 ≈ 0.186).
