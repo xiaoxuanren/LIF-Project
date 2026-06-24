@@ -31,7 +31,7 @@ the data, not carried over from older slides.
 
 ## 0 · Subnetwork of the simulated circuit
 ![](v2_subnetwork_circuit.png)
-*Node-link view of a 48-neuron subnetwork (clusters 0–2) at the neurons' spatial positions. Neurons are excitatory (red) or inhibitory (blue); lines are synapses (160 exc / 45 inh within the subset). Excitatory cells project across clusters while inhibitory cells (larger nodes) connect locally — the ground-truth circuit the methods aim to recover.*
+*Node-link view of a 48-neuron subnetwork (clusters 0–2), spring layout. Neurons are excitatory (red) or inhibitory (blue); directed arrows are synapses (160 exc / 45 inh within the subset). The ground-truth circuit the methods aim to recover.*
 
 ---
 
