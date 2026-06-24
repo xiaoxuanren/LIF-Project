@@ -29,9 +29,23 @@ the data, not carried over from older slides.
 
 ---
 
-## 0 · Subnetwork of the simulated circuit
+## 0 · Simulated circuit & activity
+
+### Subnetwork circuit (clusters 0–2, 48 neurons)
 ![](v2_subnetwork_circuit.png)
-*Node-link view of a 48-neuron subnetwork (clusters 0–2), spring layout. Neurons are excitatory (red) or inhibitory (blue); directed arrows are synapses (160 exc / 45 inh within the subset). The ground-truth circuit the methods aim to recover.*
+*Spatial-layout node-link: neurons excitatory (red) / inhibitory (blue), directed arrows = synapses (205 within the subset). Inhibitory cells wire locally; excitatory project across clusters.*
+
+### Full circuit (461 neurons)
+![](v2_fullnetwork_circuit.png)
+*Same style, whole network: 461 neurons (366 exc / 95 inh), 2,780 directed synapses; spatially-clustered wiring.*
+
+### Subnetwork raster — 48 neurons, 60 s
+![](v2_subnetwork_raster.png)
+*Spike raster of the subnetwork over the full 60 s recording (exc red below the divider / inh blue above), bold ticks, population active-fraction below. Inhibitory cells fire mainly in the synchronized stim bursts (dashed).*
+
+### Whole-network raster — 461 neurons, 60 s
+![](v2_fullnetwork_raster.png)
+*Full 461-neuron raster, 60 s, bold spikes; five stim bursts (dashed) punctuate sparse spontaneous firing — the input the inference is fit to.*
 
 ---
 
