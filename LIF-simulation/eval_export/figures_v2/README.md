@@ -29,6 +29,12 @@ the data, not carried over from older slides.
 
 ---
 
+## 0 · Subnetwork of the simulated circuit
+![](v2_subnetwork_circuit.png)
+*Node-link view of a 48-neuron subnetwork (clusters 0–2) at the neurons' spatial positions. Neurons are excitatory (red) or inhibitory (blue); lines are synapses (160 exc / 45 inh within the subset). Excitatory cells project across clusters while inhibitory cells (larger nodes) connect locally — the ground-truth circuit the methods aim to recover.*
+
+---
+
 ## 1 · Score separation
 ![](v2_score_separation.png)
 *Per-class density of predicted signed weight (voltage), each class area-normalized to 1. Exc median +0.45, inh −0.07, non 0.00; negative half shaded so inhibitory mass reads as negative.*
