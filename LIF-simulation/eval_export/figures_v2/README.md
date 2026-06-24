@@ -35,6 +35,10 @@ the data, not carried over from older slides.
 ![](v2_subnetwork_circuit.png)
 *Spatial-layout node-link: neurons excitatory (red) / inhibitory (blue), directed arrows = synapses (205 within the subset). Inhibitory cells wire locally; excitatory project across clusters.*
 
+### Recovered subnetwork circuit — spike-only (detected edges)
+![](v2_subnetwork_circuit_recovered_spike.png)
+*Same subnetwork, but arrows are the spike-only model's **detected** synapses coloured by predicted sign (124 exc / 15 inh detected; TP 119 / FP 20, thr 0.19); nodes keep their true E/I. Compared with the ground-truth circuit above, the excitatory backbone is recovered while most inhibition is missed.*
+
 ### Full circuit (461 neurons)
 ![](v2_fullnetwork_circuit.png)
 *Same style, whole network: 461 neurons (366 exc / 95 inh), 2,780 directed synapses; spatially-clustered wiring.*
