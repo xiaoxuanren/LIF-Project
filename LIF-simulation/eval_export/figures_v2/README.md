@@ -39,6 +39,10 @@ the data, not carried over from older slides.
 ![](v2_subnetwork_circuit_recovered_spike.png)
 *Same subnetwork, but arrows are the spike-only model's **detected** synapses coloured by predicted sign (124 exc / 15 inh detected; TP 119 / FP 20, thr 0.19); nodes keep their true E/I. Compared with the ground-truth circuit above, the excitatory backbone is recovered while most inhibition is missed.*
 
+### Recovered subnetwork circuit by correctness — spike-only
+![](v2_subnetwork_circuit_recovered_correctness.png)
+*Same recovered circuit coloured by correctness: **TP recovered** (green, 119), **FP false** (orange, 20), **FN missed** (slate dashed, 86; thr 0.19). The dense green is the recovered excitatory backbone; the dashed slate (missed edges) clusters around the inhibitory cells.*
+
 ### Full circuit (461 neurons)
 ![](v2_fullnetwork_circuit.png)
 *Same style, whole network: 461 neurons (366 exc / 95 inh), 2,780 directed synapses; spatially-clustered wiring.*
