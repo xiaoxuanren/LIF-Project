@@ -76,14 +76,18 @@ bet), and keeps falsification in view at every step: P0 can show the ceiling is 
 | **P0** | internal diagnostic | E/I candidate coverage + type-restricted AUC | analysis only | ~free | informs everything |
 | **P1a** | STR FDR-power (#1), Banerjee (#2) | post-hoc type-stratified thresholding | analysis only | low | does stratifying help at all? |
 | **P1b** | same | wire type-stratified surrogate-FDR into pipeline | `connectivity_metrics.py` + null pool | low | does it survive a real null? |
-| **P2** | STR subthreshold (#1), Banerjee (#2) | reshape voltage + L1 loss for inhibition | loss fns | low | recall up without precision collapse? |
+| **P0b** | internal diagnostic | depression-vs-functional-form attribution (⟨R⟩/rate decomposition of I-only AUC) | analysis only | ~free | **depressing sessions only**; depression vs form |
+| **P2** | STR subthreshold (#1), Banerjee (#2) | reshape voltage + L1 loss for inhibition | loss fns (2 flags) | low | recall up without precision collapse? |
 | **P3** | Zou/Destexhe (#3), Fiete & Seung (#D10) | conductance-based inference synapse | forward `I_syn` + Dale latent | high | oracle-type prototype must beat current form |
 | **P4** | GLM-CCG (#A1), Hafizi (#A2), STR linear (#1) | real baselines + linear ablation | new modules | medium | clears the straw-man bar |
+| **P5** | STR STP (#1), internal sim STP | short-term-depression-aware inference synapse (per-pre resource trace R̂) | forward `I_syn` + STP state | high | **depressing sessions**; fixed-STP oracle prototype must beat static-weight form |
 | **P6** | internal | sign-agnostic candidate score | `candidate_selection.py` | low | only if P0 shows I-coverage gap |
 
-Run order: **P0 → P1a → (P1b ∥ P2) → P3**, with P4 and P6 slotted by what P0/P1a reveal. P3 is the
-scientific bet; everything before it is meant to either move the metric cheaply or tell us the bet
-is necessary.
+Run order (general): **P0 → P1a → P0b (depressing sessions) → P2 → (P3 ∥ P5 by P0b outcome)**, with
+P4 and P6 slotted by what P0/P1a reveal. On a **non-depressing session** (e.g. `20260523_084407`,
+confirmed no STP) P0b is moot, so the path is **P0 → P1a → P2 → P3**. P3/P5 are the scientific bets
+(functional form vs short-term depression); everything before is meant to either move the metric
+cheaply or tell us which bet is necessary.
 
 ---
 
@@ -119,6 +123,12 @@ distribution overlaps its null, the diagnosis in §1 holds and we proceed P1→P
 **Risk.** Low. Worst case it confirms what we suspect; either way it's the prerequisite number we
 currently don't have.
 
+**Status (DONE, 2026-06-30, `20260523_084407` voltage export).** No coverage gap (I 0.9423 vs E
+0.9693, 2.71-point gap); I-only AUC 0.6337 vs E-only 0.9747 (AP 0.1300 vs 0.8917); inhibitory
+`|W|`-vs-null overlap 0.72 vs E 0.14. **Magnitude collapse confirmed** and localized: inhibition is
+recoverable in sign but not in magnitude. Not coverage, not thresholding. → proceed to the loss/form
+levers. (`scripts/inhibition_diagnostics.py`; entry 2026-06-30.)
+
 ---
 
 ### P1a — Post-hoc type-stratified thresholding (no retrain)
@@ -140,6 +150,12 @@ nothing, stratification is not the lever and we skip P1b.
 **Log.** Entry + a small table: I-edges selected and estimated FDR, pooled vs stratified.
 
 **Risk.** Low. Approximate-null caveat must be stated in the entry.
+
+**Status (DONE, 2026-06-30).** **Skipped P1b — stratification cannot fix within-type separability.**
+On `20260523_084407` the inhibitory `|W|` overlaps its own null (overlap 0.72, I-only AUC 0.6337)
+and the realized inhibitory FDR floor is 0.50, so no threshold (pooled or oracle type-stratified)
+selects true-I edges at any tolerable FDR; at the matched FDR=0.005 both select 0. The bottleneck is
+the `|W|` signal, not the bar. (entry 2026-06-30.)
 
 ---
 
@@ -168,6 +184,46 @@ the null. Report the inferred-vs-oracle type confusion so we know how much is ty
 
 ---
 
+### P0b — Depression-vs-functional-form attribution (depressing sessions only)
+
+**Applicability.** Only for sessions whose simulator used short-term depression
+(`DepressingExpSynapse`, `lif_simulation/depressing_synapse.py`; `workflows.py` records `depressing`,
+`depression_params={tau_q, delta_q}`, `synapse_depression_model`). **Moot on non-depressing sessions
+such as `20260523_084407`** (user-confirmed no STP), where the magnitude collapse cannot be a
+depression artifact and the suspects reduce to functional form (P3) and voltage-loss weighting (P2).
+
+**Hypothesis.** When depression is on, the resource `R` is per-presynaptic-neuron, so a presynaptic
+unit's time-averaged efficacy ≈ `nominal_weight × ⟨R_j⟩`, which falls steeply with its firing rate.
+A static-weight inference model recovers that *effective* efficacy, so high-rate units (including
+fast-spiking inhibitory cells) get systematically shrunk — a depression artifact masquerading as an
+inference failure.
+
+**Change.** None to the model. Post-hoc, reusing the P0 export + the session spike trains: compute
+per-neuron firing rate and `⟨R_j⟩` from the simulator's resource recursion (on spike: release `R`,
+`R *= (1−delta_q)`; each ms `R += (1−R)·dt/tau_q`) under the recorded (or, if unrecorded, explicitly
+*assumed default*) `tau_q/delta_q`. Then: (a) Pearson/Spearman of recovered `|W|` with `⟨R_j⟩` and
+with rate, split E/I (positive `|W|`–⟨R⟩ / negative `|W|`–rate for true-I edges is the depression
+signature); (b) **the disambiguator** — decompose the I-only separation AUC by `⟨R⟩`/rate tertile:
+if low-⟨R⟩ (high-rate) I collapses while high-⟨R⟩ (low-rate) I separates → depression dominates; if
+even low-rate I fails → functional form dominates; (c) signed `weight_corr` of recovered weights vs
+`true_weights` and vs `true_weights · ⟨R_j⟩` (a large rise with the effective target quantifies
+uncorrected depression). Lands as a flag-guarded mode of `scripts/inhibition_diagnostics.py`
+(`--depression-attribution`).
+
+**Decision rule.** Depression ON + low-rate-I separates but high-rate-I collapses (+ strong
+`|W|`–⟨R⟩ corr) → **P5** (depression-aware synapse, STP fixed-from-known) is the priority treatment,
+candidate to fuse with P3; P2 loss-reshaping alone is likely insufficient. Depression ON but
+I-collapse rate-independent → functional form dominates, P2 then P3. Depression OFF/unrecorded → not
+implicated; go P2 → P3 (and check the canonical 0.48-benchmark session's `depressing` flag
+separately).
+
+**Log.** Entry + the `|W|`-vs-⟨R⟩ scatter (colored by E/I) and the per-tertile I-AUC bar chart.
+
+**Risk.** Low. Approximate where `⟨R⟩` assumes default STP params (unrecorded session); label as a
+sensitivity check.
+
+---
+
 ### P2 — Reshape the voltage and L1 loss toward inhibition
 
 **Hypothesis.** A uniform voltage `smooth_l1` is dominated by large excitatory excursions, so IPSP
@@ -176,17 +232,19 @@ Concentrating voltage supervision where synapses are identifiable (STR's subthre
 where inhibition is visible (hyperpolarized epochs — Banerjee's remedy, loss-side) should raise
 inhibitory recall.
 
-**Change.** In `compute_voltage_augmented_event_loss` / `_continuous_loss`:
-- **Hyperpolarization-weighted voltage term:** weight the voltage residual by
-  `1 + γ·relu(−vt_local)` where `vt_local` is the target Vm relative to its local baseline, so
-  below-baseline (IPSP) bins contribute more gradient. New flag `--voltage-hyperpol-gamma`
-  (default 0, i.e. exact current behavior).
+**Change.** In `compute_voltage_augmented_event_loss` / `compute_voltage_augmented_continuous_loss`:
+- **Hyperpolarization-weighted voltage term [IMPLEMENTED 2026-06-30]:** weight the voltage residual
+  by `1 + γ·relu(−vt)` where `vt` is the normalized, per-neuron baseline-subtracted target Vm, so
+  below-baseline (IPSP) bins contribute more gradient (implemented as a hyperpolarization-weighted
+  mean `Σ w·ℓ / Σ w`). Flag `--voltage-hyperpol-gamma` (default 0.0, exact current behavior).
 - **Subthreshold concentration (STR):** optionally restrict/upweight the voltage term on
   non-refractory subthreshold bins (spike neighborhoods are already masked; this further
-  emphasizes the clean-kernel regime). Flag `--voltage-subthreshold-only`.
-- **Asymmetric L1:** reduce or zero the L1 penalty on inferred-inhibitory candidates so sparsity
-  does not preferentially kill the edges we are trying to detect. Flag `--l1-inhibitory-scale`
-  (default 1.0). *This one is my inference, not from a paper — treat strictly as an ablation.*
+  emphasizes the clean-kernel regime). Flag `--voltage-subthreshold-only`. *(not yet implemented)*
+- **Asymmetric L1 [IMPLEMENTED 2026-06-30, oracle]:** scale (e.g. zero) the L1 penalty on
+  inhibitory candidates so sparsity does not preferentially kill the edges we are trying to detect.
+  Flag `--l1-inhibitory-scale` (default 1.0); first pass uses **oracle** presynaptic type (sign of
+  outgoing `true_weights`), inferred-type is a follow-up. *My inference, not from a paper — strictly
+  an ablation.* Both flags default to no-op and leave the surrogate machinery untouched.
 
 **Decision rule.** Advance any sub-change that raises inhibitory recall without dropping overall
 AUC below the 0.916 voltage-augmented baseline (or sign below 0.70) by more than a small margin.
@@ -200,9 +258,14 @@ decomposition, plus the overall guardrail metrics.
 **Risk.** Low-moderate. Over-weighting hyperpolarized bins could trade excitatory precision; the
 isolated-ablation discipline catches that.
 
----
-
-### P3 — Conductance-based inference synapse (the scientific bet)
+**Status (PARTIAL, 2026-06-30).** Two flags implemented, unit-tested (defaults are exact no-ops;
+weighting/scaling match closed-form), and CLI-smoke-tested end-to-end incl. the surrogate-FDR path:
+`--voltage-hyperpol-gamma` and `--l1-inhibitory-scale` (oracle type) in
+`lif_inference/voltage_augmented_learned_lif_connectivity.py`. **Ablation runs B (γ=2) and A
+(l1-inh=0 oracle) on `20260523_084407` are NOT yet run: that session's raw data is absent on this
+machine** (gitignored; only the saved connectivity export is present), and the runs require training
+on the spike+voltage recordings. Pending the 0523 data (or a re-baselined present session). (entry
+2026-06-30.)
 
 **Hypothesis (the core test of §1).** Replacing the current-based kernel with a conductance-based
 drive that matches the generative model removes the functional-form bias and lets the voltage
@@ -241,6 +304,42 @@ the full guardrail metric set and the inhibitory decomposition from P0.
 **Risk.** High. Biggest change; coupled synaptic/membrane dynamics, voltage-frame consistency, and
 optimization stability are all live. The oracle-first gating keeps a clean falsification path and
 prevents a repeat of the Dale confound (where a mechanically-correct change still hurt ranking).
+
+---
+
+### P5 — Short-term-depression-aware inference synapse (depressing sessions)
+
+**Applicability / gating.** Reserved for **depressing sessions** and prioritized by **P0b**: only
+worth the plumbing if P0b shows the inhibitory collapse tracks `⟨R⟩`/rate (depression artifact)
+rather than being rate-independent. Moot where the simulator used no STP (e.g. `20260523_084407`).
+
+**Hypothesis (the depression counterpart of §1's form bet).** A static-weight kernel recovers each
+presynaptic unit's *time-averaged* efficacy `nominal_weight × ⟨R_j⟩`, which is rate-suppressed for
+high-rate (often inhibitory) units. Giving the inference synapse its own per-presynaptic resource
+trace `R̂_j(t)` — so the effective drive is `w_k · R̂_j(t) · spike` — lets the model factor the
+nominal weight out of the depression envelope and recover the *structural* weight, lifting inhibitory
+magnitude (hence detection) where depression is the cause.
+
+**Change.** Add a per-presynaptic-neuron resource state `R̂_j(t)` to the forward synapse (release on
+presynaptic spike, recover toward 1 with `tau_q`; drop by `delta_q` per release), and route it into
+`I_syn` as `Σ_k w_k · R̂_{pre(k)}(t) · (delay-weighted spikes)`. **STP params fixed-from-known first**
+(the simulator's `tau_q`/`delta_q`, labeled **oracle**) to isolate the question *does undoing
+depression recover inhibitory weight?*; only if that wins, make `tau_q`/`delta_q` learnable per type.
+The resource recursion mirrors the simulator's `DepressingExpSynapse`. **Candidate to fuse with P3**:
+a conductance-based, depression-aware synapse (`gE/gI` driven by `R̂_j`-scaled spikes) is the joint
+form if both P0b and §1 implicate their respective mechanisms.
+
+**Decision rule.** The fixed-STP oracle prototype must beat the static-weight form on
+inhibitory-restricted detection AUC by a clear margin while holding overall AUC ≥ 0.916 and sign
+≥ 0.70. If it does not, depression is not the lever even on a depressing session — fall back to P3.
+
+**Log.** Entries for the fixed-STP oracle prototype and (if reached) the learnable-STP version, with
+the P0 inhibitory decomposition and the full guardrail set; report against the matched static-weight
+baseline on the same depressing session.
+
+**Risk.** High. Adds coupled synaptic state and another optimization surface; oracle-first gating and
+the isolated-ablation discipline keep falsification clean. Type-error in learnable-STP propagates as
+in P1b/P3 — report inferred-vs-oracle type confusion if types are inferred.
 
 ---
 
@@ -350,3 +449,33 @@ Definition of done: the diagnostics script runs to completion on a real saved (o
 ```
 
 **Result (run 2026-06-30, export `connectivity_20260523_084407_voltage_all20_K100.npz`):** coverage E 0.9693 / I 0.9423 (gap 2.71 pts → no I-coverage gap); AUC all 0.9162 / E-only 0.9747 / I-only 0.6337 (AP 0.7602 / 0.8917 / 0.1300); inhibitory signal-vs-null overlap 0.7195 vs excitatory 0.1392; existing pooled threshold selects 70 true-I edges at realized I-FDR 0.6833; inhibitory FDR floor 0.50 makes the FDR=0.005 target unreachable, so pooled and oracle type-stratified both select 0 true-I edges at matched FDR. Gate (a): no (skip P6 jump). Gate (b): no (skip P1b). Recommended next: P2 loss reshaping, with P3 queued. See `EXPERIMENT_LOG.md` 2026-06-30 entry.
+
+### Prompt 2 — P2 loss-reshaping flags + ablations (P0b/P5 plan edits)
+
+> Issued after the user confirmed `20260523_084407` is non-depressing (redirecting from P0b straight
+> to P2). Version-controlled copy; full text below.
+
+```
+Task: Phase P2 from 03_inhibition_improvement_plan.md — reshape the voltage/L1 loss toward inhibition, on the non-depressing 20260523_084407 session, as isolated flag-guarded ablations. The metric is the P0 inhibitory decomposition.
+On branch feature/inhibition-detection. Context: P0/P1a (entry 2026-06-30) localized the inhibition failure to magnitude recovery (I-only AUC 0.6337 vs E-only 0.9747; inhibitory |W|-vs-null overlap 0.72), and ruled out coverage and thresholding. The user has confirmed 20260523_084407 does not use depression, so depression is excluded as a cause on this session; the remaining suspects are synaptic functional form and voltage-loss weighting. P2 tests the loss-weighting suspect cheaply before the P3 conductance rewrite. Keep canonical benchmark numbers (0.883 / 0.916 / 0.70 / 0.48 / 461 / 366 E / 95 I / 2,780) distinct from this run's I-only 0.6337; never round.
+Baseline config to match exactly (the 0523 voltage run behind the P0 export): --training-mode event_window --slow-state-mode adaptation_h --connectivity-threshold-mode surrogate_fdr_per_neuron --surrogate-fdr 0.005 --n-threshold-surrogates 4 --surrogate-epochs 2 --surrogate-patience 1 --k 100 --epochs 40 --patience 8 --batch 128 --max-delay 8 --l1 0.01 --pos-weight 5.0 --voltage-lambda 1.0 --mask-pre-ms 0.0 --warmup 100 --exclude-detected-bursts, hybrid candidates (80 spatial + 20 temporal, lag 1–8), session LIF-simulation/LIF data/20260523_084407. Each ablation changes exactly ONE thing; do not stack.
+Implement two flags in the voltage script (lif_inference/voltage_augmented_learned_lif_connectivity.py: build_parser, and compute_voltage_augmented_event_loss / compute_voltage_augmented_continuous_loss), each defaulting to current behavior:
+--voltage-hyperpol-gamma γ (default 0.0): weight the per-bin voltage residual by 1 + γ·relu(−vt) before the smooth_l1 reduction, applied only on valid voltage bins (the existing mask). The normalized target vt is already per-neuron baseline-subtracted, so relu(−vt) upweights below-baseline (IPSP) bins. This needs no type information — Banerjee's remedy, loss-side.
+--l1-inhibitory-scale s (default 1.0): scale the L1 penalty per candidate by s for candidates whose presynaptic neuron is inhibitory, 1.0 otherwise. For this first test use ORACLE presynaptic type (sign of each presynaptic neuron's outgoing nonzero true_weights), passed in and clearly labeled oracle in the run tag and log; an inferred-type version is a follow-up only if this helps. This stops L1's constant-magnitude gradient from pinning small inhibitory weights to zero.
+Runs. Ablation B: baseline + --voltage-hyperpol-gamma 2.0 (tag suffix _hyperpolg2). Ablation A: baseline + --l1-inhibitory-scale 0.0 oracle (tag suffix _l1inh0_ORACLE). If compute is tight, run B first alone and push — it's the principled, oracle-free discriminator; A can follow in the next push. (Note for the user: these are full ~multi-hour CPU runs each; reduce --epochs for a faster first read if needed, matching the reduced budget across arms.)
+Evaluate. For each ablation's saved connectivity export, re-run python scripts/inhibition_diagnostics.py --conn <export> to get the inhibitory decomposition, and report vs the 0523 baseline: I-only AUC (target: up from 0.6337), I-only AP (from 0.1300), inhibitory |W|-vs-null overlap (down from 0.72), with guardrails overall AUC ≥ ~0.916 and sign_accuracy ≥ ~0.97 (must not regress materially; the canonical inhibitory sign floor is 0.70). E-only AUC should stay ~0.975.
+Log + plan update. One EXPERIMENT_LOG.md entry per ablation (template, today's date, titles like "P2 Hyperpol-Weighted Voltage Ablation (γ=2) For 20260523_084407" / "P2 Oracle Asymmetric-L1 (inh=0) Ablation For 20260523_084407"), each reporting the metrics above and stating in Interpretation whether the loss change lifted I-only separation (→ inhibition was present-but-underweighted, keep/extend the change) or did not (→ evidence the current-based form is the ceiling, commit to P3). Then apply these edits to 03_inhibition_improvement_plan.md (these carry the P0b-prompt edits that were never run, since the user redirected before P0b): add a Status line to P0 ("no coverage gap; I-only AUC 0.6337 vs E-only 0.9747; magnitude collapse confirmed") and P1a ("skipped P1b — stratification cannot fix within-type separability"); add P0b — depression-vs-functional-form attribution as a section, marked applicable only to depressing sessions (moot on non-depressing 0523); add P5 — short-term-depression-aware inference synapse after P3 (per-presynaptic resource trace R̂_j(t), effective drive w_k·R̂_j(t)·spike, STP params fixed-from-known/oracle first, candidate to fuse with P3, reserved for depressing sessions); update the run-order line to: general P0 → P1a → P0b(depressing) → P2 → (P3 ∥ P5), and note non-depressing 0523 runs P0 → P1a → P2 → P3. Append this prompt under "Prompt 2" in Appendix A.
+Commit + push. Stage the flag implementation, ablation exports/artifacts, diagnostic re-runs, log entries, and plan edits; commit; push feature/inhibition-detection.
+Definition of done: at least Ablation B runs end-to-end and its inhibitory decomposition is reported against the 0523 baseline with guardrails; the log states whether loss-reshaping moved I-only separation; the plan reflects the P0/P1a status and the P0b/P5 additions; everything pushed. No default/model/simulator changes outside the two new flags; oracle usage explicitly labeled.
+```
+
+**Result (2026-06-30).** Both flags implemented in
+`lif_inference/voltage_augmented_learned_lif_connectivity.py` (parser + both loss fns + run-pipeline
+plumbing + saved provenance), defaulting to exact no-ops and leaving the surrogate machinery
+untouched. Verified: unit tests (defaults reproduce the prior loss exactly; γ-weighting and L1
+scaling match closed form) and end-to-end CLI smoke runs on a present voltage session incl. the
+surrogate-FDR path. **Ablations A/B on `20260523_084407` were NOT run: that session's raw spike+
+voltage data is absent on this machine** (gitignored; only the connectivity export is present), and
+P2 ablations require training on the recordings. Plan edits (P0/P1a Status, P0b, P5, run order)
+applied. Pending a decision on data provenance / session choice for the actual runs. See
+`EXPERIMENT_LOG.md` 2026-06-30 P2 entry.

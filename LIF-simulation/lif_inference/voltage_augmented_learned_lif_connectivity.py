@@ -978,7 +978,9 @@ def compute_voltage_augmented_event_loss(spike_probs, predicted_voltage,
                                          post_spikes, target_voltage,
                                          target_voltage_mask, weights, warmup,
                                          pos_weight=5.0, l1_lambda=0.01,
-                                         voltage_lambda=1.0):
+                                         voltage_lambda=1.0,
+                                         voltage_hyperpol_gamma=0.0,
+                                         l1_weight_scale=None):
     """Combine spike BCE, masked voltage loss, and L1 sparsity into one objective.
 
     Args:
@@ -992,6 +994,14 @@ def compute_voltage_augmented_event_loss(spike_probs, predicted_voltage,
         pos_weight: Positive-class weighting used in the spike BCE term.
         l1_lambda: Weight on L1 sparsity regularization.
         voltage_lambda: Weight on the masked voltage supervision term.
+        voltage_hyperpol_gamma: P2 flag. When > 0, weight each valid voltage
+            residual by ``1 + gamma * relu(-vt)`` (a hyperpolarization-weighted
+            mean) so below-baseline (IPSP) bins of the normalized, per-neuron
+            baseline-subtracted target contribute more gradient. ``0.0`` (default)
+            reproduces the unweighted ``smooth_l1`` mean exactly.
+        l1_weight_scale: P2 flag. Optional per-candidate multiplier on the L1
+            penalty, same shape as ``weights`` (``[B, K]``). ``None`` (default)
+            reproduces the uniform ``weights.abs().mean()`` exactly.
 
     Returns:
         The total loss tensor, scalar spike loss, scalar voltage loss, scalar L1 loss,
@@ -1010,13 +1020,23 @@ def compute_voltage_augmented_event_loss(spike_probs, predicted_voltage,
 
     # Some windows lose every voltage target after masking; keep the loss well-defined in that case.
     if torch.any(vm):
-        voltage_loss = F.smooth_l1_loss(vp[vm], vt[vm])
+        if voltage_hyperpol_gamma and voltage_hyperpol_gamma > 0.0:
+            # Hyperpolarization-weighted voltage mean: upweight below-baseline
+            # (IPSP) bins so inhibition registers more strongly in the gradient.
+            per_bin = F.smooth_l1_loss(vp[vm], vt[vm], reduction='none')
+            hyper_w = 1.0 + voltage_hyperpol_gamma * F.relu(-vt[vm])
+            voltage_loss = (per_bin * hyper_w).sum() / hyper_w.sum().clamp_min(1e-8)
+        else:
+            voltage_loss = F.smooth_l1_loss(vp[vm], vt[vm])
         n_voltage_points = int(vm.sum().item())
     else:
         voltage_loss = vp.sum() * 0.0
         n_voltage_points = 0
 
-    l1_loss = l1_lambda * weights.abs().mean()
+    if l1_weight_scale is not None:
+        l1_loss = l1_lambda * (weights.abs() * l1_weight_scale).mean()
+    else:
+        l1_loss = l1_lambda * weights.abs().mean()
     total = spike_loss + voltage_lambda * voltage_loss + l1_loss
     return total, spike_loss.item(), voltage_loss.item(), l1_loss.item(), n_voltage_points
 
@@ -1047,6 +1067,13 @@ def train_epoch_events(model, dataloader, optimizer, device, warmup,
     total_voltage_points = 0
     n = 0
 
+    # P2 loss-reshaping config is carried on the model so this shared epoch
+    # runner (also reused by the surrogate machinery) keeps its signature.
+    # Surrogate/baseline models lack these attributes -> defaults reproduce
+    # the exact prior behavior.
+    voltage_hyperpol_gamma = getattr(model, 'voltage_hyperpol_gamma', 0.0)
+    l1_candidate_scale = getattr(model, 'l1_candidate_scale', None)
+
     for pre_sp, post_sp, post_v, post_vm, neuron_ids, is_pos in dataloader:
         del is_pos
         pre_sp = pre_sp.to(device)
@@ -1060,10 +1087,13 @@ def train_epoch_events(model, dataloader, optimizer, device, warmup,
         spike_probs, voltages, weights = model(
             pre_sp, post_sp, neuron_ids, tbptt_len=window_len,
         )
+        l1_weight_scale = None if l1_candidate_scale is None else l1_candidate_scale[neuron_ids]
         loss, sl, vl, l1l, n_voltage_points = compute_voltage_augmented_event_loss(
             spike_probs, voltages, post_sp, post_v, post_vm, weights,
             warmup, pos_weight=pos_weight, l1_lambda=l1_lambda,
             voltage_lambda=voltage_lambda,
+            voltage_hyperpol_gamma=voltage_hyperpol_gamma,
+            l1_weight_scale=l1_weight_scale,
         )
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1112,6 +1142,11 @@ def evaluate_event_windows(model, dataloader, device, warmup,
     total_voltage_points = 0
     n = 0
 
+    # Mirror the training-loss shaping (see train_epoch_events) so early stopping
+    # tracks the same objective; defaults reproduce prior behavior exactly.
+    voltage_hyperpol_gamma = getattr(model, 'voltage_hyperpol_gamma', 0.0)
+    l1_candidate_scale = getattr(model, 'l1_candidate_scale', None)
+
     for pre_sp, post_sp, post_v, post_vm, neuron_ids, is_pos in dataloader:
         del is_pos
         pre_sp = pre_sp.to(device)
@@ -1124,10 +1159,13 @@ def evaluate_event_windows(model, dataloader, device, warmup,
         spike_probs, voltages, weights = model(
             pre_sp, post_sp, neuron_ids, tbptt_len=window_len,
         )
+        l1_weight_scale = None if l1_candidate_scale is None else l1_candidate_scale[neuron_ids]
         loss, sl, vl, l1l, n_voltage_points = compute_voltage_augmented_event_loss(
             spike_probs, voltages, post_sp, post_v, post_vm, weights,
             warmup, pos_weight=pos_weight, l1_lambda=l1_lambda,
             voltage_lambda=voltage_lambda,
+            voltage_hyperpol_gamma=voltage_hyperpol_gamma,
+            l1_weight_scale=l1_weight_scale,
         )
 
         total_loss += loss.item()
@@ -1211,8 +1249,15 @@ def compute_voltage_augmented_continuous_loss(spike_probs, predicted_voltage,
                                               target_voltage_mask, loss_mask,
                                               weights, pos_weight=5.0,
                                               l1_lambda=0.01,
-                                              voltage_lambda=1.0):
-    """Compute spike, voltage, and sparsity losses over valid continuous bins."""
+                                              voltage_lambda=1.0,
+                                              voltage_hyperpol_gamma=0.0,
+                                              l1_weight_scale=None):
+    """Compute spike, voltage, and sparsity losses over valid continuous bins.
+
+    ``voltage_hyperpol_gamma`` (default 0.0) and ``l1_weight_scale`` (default
+    None) are the P2 loss-reshaping knobs; both defaults reproduce the prior
+    behavior exactly. See ``compute_voltage_augmented_event_loss`` for semantics.
+    """
     valid_spike_bins = loss_mask > 0.5
     if torch.any(valid_spike_bins):
         sp = spike_probs[valid_spike_bins]
@@ -1226,16 +1271,26 @@ def compute_voltage_augmented_continuous_loss(spike_probs, predicted_voltage,
 
     valid_voltage_bins = (target_voltage_mask > 0.5) & valid_spike_bins
     if torch.any(valid_voltage_bins):
-        voltage_loss = F.smooth_l1_loss(
-            predicted_voltage[valid_voltage_bins],
-            target_voltage[valid_voltage_bins],
-        )
+        vt_valid = target_voltage[valid_voltage_bins]
+        if voltage_hyperpol_gamma and voltage_hyperpol_gamma > 0.0:
+            per_bin = F.smooth_l1_loss(
+                predicted_voltage[valid_voltage_bins], vt_valid, reduction='none',
+            )
+            hyper_w = 1.0 + voltage_hyperpol_gamma * F.relu(-vt_valid)
+            voltage_loss = (per_bin * hyper_w).sum() / hyper_w.sum().clamp_min(1e-8)
+        else:
+            voltage_loss = F.smooth_l1_loss(
+                predicted_voltage[valid_voltage_bins], vt_valid,
+            )
         n_voltage_points = int(valid_voltage_bins.sum().item())
     else:
         voltage_loss = predicted_voltage.sum() * 0.0
         n_voltage_points = 0
 
-    l1_loss = l1_lambda * weights.abs().mean()
+    if l1_weight_scale is not None:
+        l1_loss = l1_lambda * (weights.abs() * l1_weight_scale).mean()
+    else:
+        l1_loss = l1_lambda * weights.abs().mean()
     total = spike_loss + voltage_lambda * voltage_loss + l1_loss
     n_spike_points = int(valid_spike_bins.sum().item())
     return total, spike_loss.item(), voltage_loss.item(), l1_loss.item(), n_voltage_points, n_spike_points
@@ -1261,6 +1316,11 @@ def run_continuous_state_epoch(model, spike_matrix, voltage_matrix, voltage_mask
         total_bins, boundaries, excluded_bins=excluded_bins, warmup=warmup,
     )
 
+    # P2 loss-reshaping config carried on the model (see train_epoch_events);
+    # surrogate/baseline models lack these attributes -> defaults = prior behavior.
+    voltage_hyperpol_gamma = getattr(model, 'voltage_hyperpol_gamma', 0.0)
+    l1_candidate_scale = getattr(model, 'l1_candidate_scale', None)
+
     for rec_start, rec_end in iter_continuous_segments(boundaries):
         state = None
         for chunk_start in range(rec_start, rec_end, int(chunk_len)):
@@ -1280,6 +1340,8 @@ def run_continuous_state_epoch(model, spike_matrix, voltage_matrix, voltage_mask
                     initial_state=state,
                     return_state=True,
                 )
+                l1_weight_scale = (None if l1_candidate_scale is None
+                                   else l1_candidate_scale[neuron_ids_tensor])
                 loss, sl, vl, l1l, n_voltage_points, n_spike_points = (
                     compute_voltage_augmented_continuous_loss(
                         spike_probs, voltages, post_sp, post_v, post_vm,
@@ -1287,6 +1349,8 @@ def run_continuous_state_epoch(model, spike_matrix, voltage_matrix, voltage_mask
                         pos_weight=pos_weight,
                         l1_lambda=l1_lambda,
                         voltage_lambda=voltage_lambda,
+                        voltage_hyperpol_gamma=voltage_hyperpol_gamma,
+                        l1_weight_scale=l1_weight_scale,
                     )
                 )
                 if training and n_spike_points > 0:
@@ -2022,7 +2086,9 @@ def load_single_recording_with_voltage(session_dir, recording_idx=0, dt=1.0,
 def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  batch_size=128, patience=20, val_fraction=0.2, dt=None,
                  max_delay=None, max_delay_ms=10.0, l1_lambda=0.01, pos_weight=5.0,
-                 dale=False, voltage_lambda=1.0, subsample_T=None, device=None,
+                 dale=False, voltage_lambda=1.0,
+                 voltage_hyperpol_gamma=0.0, l1_inhibitory_scale=1.0,
+                 subsample_T=None, device=None,
                  output_tag=None, pre_context=50, post_context=10,
                  warmup=100, neg_ratio=1.0, neg_min_distance=100,
                  training_mode='event_window', continuous_chunk_len=250,
@@ -2140,6 +2206,11 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     if output_tag:
         print(f'Output tag: {output_tag}')
     print(f'K={K}, epochs={n_epochs}, lr={lr}, max_delay={max_delay}, l1={l1_lambda}, voltage_lambda={voltage_lambda}')
+    if voltage_hyperpol_gamma and float(voltage_hyperpol_gamma) > 0.0:
+        print(f'P2 voltage-hyperpol-gamma={voltage_hyperpol_gamma} (IPSP/below-baseline voltage bins upweighted; type-free)')
+    if l1_inhibitory_scale is not None and float(l1_inhibitory_scale) != 1.0:
+        print(f'P2 l1-inhibitory-scale={l1_inhibitory_scale} on ORACLE-inhibitory candidates '
+              f'(presynaptic type from sign of outgoing true_weights; oracle diagnostic)')
     print(f'Window: warmup={warmup}, pre={pre_context}, post={post_context} ({warmup + pre_context + post_context} bins)')
     print(f'Training mode: {training_mode}, continuous_chunk_len={continuous_chunk_len}')
     print(f'Voltage cleaning: mask_pre={mask_pre_ms}ms, mask_post={mask_post_ms}ms, peak<{peak_threshold_mv}mV')
@@ -2328,6 +2399,32 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         dale=dale,
         neighbor_indices=neighbor_indices,
     ).to(device)
+    # --- P2 loss-reshaping config attached to the model (read by the epoch
+    # runners via getattr; surrogate/baseline models never see these). Both
+    # defaults are no-ops that reproduce the exact prior training behavior. ---
+    model.voltage_hyperpol_gamma = float(voltage_hyperpol_gamma or 0.0)
+    model.l1_candidate_scale = None
+    l1_inhibitory_scale = 1.0 if l1_inhibitory_scale is None else float(l1_inhibitory_scale)
+    if l1_inhibitory_scale != 1.0:
+        # ORACLE presynaptic type: a presynaptic neuron is inhibitory if the sign
+        # of its summed outgoing nonzero true weights is negative (Dale-respecting
+        # generation). Build a [n_neurons, K_actual] L1 multiplier aligned to the
+        # model's candidate ordering (neighbor_indices), scaling only inhibitory
+        # candidates so L1 sparsity stops pinning small inhibitory weights to zero.
+        has_outgoing = (true_weights != 0).any(axis=0)
+        pre_is_inhibitory = has_outgoing & (true_weights.sum(axis=0) < 0.0)
+        scale_matrix = np.ones((n_neurons, K_actual), dtype=np.float32)
+        n_inh_candidates = 0
+        for j in range(n_neurons):
+            pre_ids = np.asarray(neighbor_indices[j], dtype=np.int64).ravel()[:K_actual]
+            inh_mask = pre_is_inhibitory[pre_ids]
+            scale_matrix[j, :len(pre_ids)][inh_mask] = l1_inhibitory_scale
+            n_inh_candidates += int(inh_mask.sum())
+        model.l1_candidate_scale = torch.as_tensor(scale_matrix, device=device)
+        print(f'  P2 oracle asymmetric-L1: scaled {n_inh_candidates} inhibitory candidate slots '
+              f'(of {n_neurons * K_actual}) by {l1_inhibitory_scale}; '
+              f'{int(pre_is_inhibitory.sum())} presynaptic neurons typed inhibitory (oracle).')
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     membrane_threshold_params = 2 * n_neurons + 4 if model.threshold_mode == 'adaptive' else 4
     dale_params = n_neurons if model.dale else 0
@@ -2629,6 +2726,10 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         true_weights=true_weights,
         slow_state_mode=model.slow_state_mode,
         dale=np.array(bool(model.dale)),
+        voltage_hyperpol_gamma=np.array(float(model.voltage_hyperpol_gamma)),
+        l1_inhibitory_scale=np.array(float(l1_inhibitory_scale)),
+        l1_inhibitory_type_source=('oracle_true_weights'
+                                   if l1_inhibitory_scale != 1.0 else 'none'),
         per_neuron_ids=per_neuron_ids,
         per_neuron_thresholds=per_neuron_thresholds,
         per_neuron_selected_edges=per_neuron_selected_edges,
@@ -2695,6 +2796,16 @@ def build_parser():
     parser.add_argument('--pos-weight', type=float, default=5.0)
     parser.add_argument('--voltage-lambda', type=float, default=1.0,
                         help='Weight on masked subthreshold voltage loss')
+    parser.add_argument('--voltage-hyperpol-gamma', type=float, default=0.0,
+                        help='P2 ablation. Weight each valid voltage residual by '
+                             '1 + gamma*relu(-vt) before the smooth_l1 mean, so below-baseline '
+                             '(IPSP) bins of the normalized target contribute more gradient. '
+                             'Default 0.0 reproduces the uniform voltage loss. Type-free.')
+    parser.add_argument('--l1-inhibitory-scale', type=float, default=1.0,
+                        help='P2 ablation. Scale the L1 penalty by this factor for candidates whose '
+                             'presynaptic neuron is inhibitory (ORACLE type from sign of outgoing '
+                             'true_weights), 1.0 otherwise. Use 0.0 to remove L1 pressure on '
+                             'inhibitory candidates. Default 1.0 reproduces uniform L1. Oracle diagnostic.')
     parser.add_argument('--dt', type=float, default=None,
                         help='Optional spike/voltage bin width override in ms. Defaults to the session metadata value.')
     parser.add_argument('--recording', type=int, default=0)
@@ -2791,6 +2902,8 @@ def main(argv=None):
         dale=args.dale,
         l1_lambda=args.l1, pos_weight=args.pos_weight,
         voltage_lambda=args.voltage_lambda,
+        voltage_hyperpol_gamma=args.voltage_hyperpol_gamma,
+        l1_inhibitory_scale=args.l1_inhibitory_scale,
         val_fraction=args.val_fraction, output_tag=args.output_tag,
         subsample_T=args.subsample, device=args.device,
         pre_context=args.pre_context, post_context=args.post_context,
