@@ -258,14 +258,19 @@ decomposition, plus the overall guardrail metrics.
 **Risk.** Low-moderate. Over-weighting hyperpolarized bins could trade excitatory precision; the
 isolated-ablation discipline catches that.
 
-**Status (PARTIAL, 2026-06-30).** Two flags implemented, unit-tested (defaults are exact no-ops;
-weighting/scaling match closed-form), and CLI-smoke-tested end-to-end incl. the surrogate-FDR path:
-`--voltage-hyperpol-gamma` and `--l1-inhibitory-scale` (oracle type) in
-`lif_inference/voltage_augmented_learned_lif_connectivity.py`. **Ablation runs B (γ=2) and A
-(l1-inh=0 oracle) on `20260523_084407` are NOT yet run: that session's raw data is absent on this
-machine** (gitignored; only the saved connectivity export is present), and the runs require training
-on the spike+voltage recordings. Pending the 0523 data (or a re-baselined present session). (entry
-2026-06-30.)
+**Status (DONE, 2026-07-01, both ablations run on restored `20260523_084407`).** Flags implemented +
+unit/smoke-tested (2026-06-30), then run against a **matched γ=0/scale-1 baseline** (identical code/
+config; reproduced the normal pipeline: overall AUC 0.9085, E-only 0.9544, I-only 0.6823, sign
+0.9687 — validating the comparison). **Neither loss-reshaping lever moved I-only separation.**
+Ablation B (`--voltage-hyperpol-gamma 2.0`): I-only 0.6823 → 0.6701 (flat/down) while E-only
+collapsed 0.9544 → 0.5874 and overall → 0.6121, sign → 0.4413 (γ=2 over-weights IPSP bins ~7× and
+abandons excitatory PSP fitting; all guardrails fail). Ablation A (`--l1-inhibitory-scale 0.0`,
+oracle): I-only 0.6823 → 0.6877 (+0.005, within RNG noise), no collateral (overall 0.9106, sign
+0.9668) — L1 is a negligible fraction of the objective, so removing it changes nothing.
+**Verdict → commit to P3**: the cheap model-free levers are ruled out; evidence points to the
+current-based functional form as the inhibitory ceiling (§1). Optional cheap pre-step: a
+`--voltage-hyperpol-gamma {0.25,0.5,1.0}` sweep to fully close the hyperpol lever. (entries
+2026-07-01; compare vs the matched baseline I-only 0.6823, not the P0 export 0.6337.)
 
 **Hypothesis (the core test of §1).** Replacing the current-based kernel with a conductance-based
 drive that matches the generative model removes the functional-form bias and lets the voltage
