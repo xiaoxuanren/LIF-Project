@@ -674,10 +674,12 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         # softplus-weighted spike sums routed by ORACLE presynaptic type. |W| = softplus(W).
         self.conductance_synapse = bool(conductance_synapse)
         if self.conductance_synapse:
-            # Small initial magnitudes: softplus(-4) ~= 0.018, so conductances start weak
-            # and the driving-force feedback (E_rev - v) keeps early dynamics stable
-            # (avoids the monotonic-decline failure seen with moderate init).
-            self.W = nn.Parameter(torch.full((n_neurons, K), -4.0))
+            # Initialize W at 0 (softplus(0)=0.693). The stable backward-Euler update
+            # removes any need for a tiny init, and W=0 keeps the weight gradient
+            # healthy: d(softplus(W))/dW = sigmoid(W)=0.5 at W=0, versus ~0.018 at
+            # W=-4 which starved the gradient and stalled optimization (conn_AUC stuck
+            # near chance). Matches the current-based model's W=0 starting point.
+            self.W = nn.Parameter(torch.zeros(n_neurons, K))
         else:
             self.W = nn.Parameter(torch.zeros(n_neurons, K))
         self.dale = bool(dale)
