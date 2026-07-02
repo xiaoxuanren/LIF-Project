@@ -310,6 +310,38 @@ the full guardrail metric set and the inhibitory decomposition from P0.
 optimization stability are all live. The oracle-first gating keeps a clean falsification path and
 prevents a repeat of the Dale confound (where a mechanically-correct change still hurt ranking).
 
+**Refinement (2026-07-01, implemented as `--conductance-synapse`, default off).**
+- *Reversal mapping (concrete).* Read `e_exc=0`, `e_inh=−75`, `v_rest=−61.5` mV from
+  `lif_simulation.models.LIFNeuron` (not hardcoded). Map per postsynaptic neuron into the normalized
+  voltage frame via the loader's per-neuron `baseline_median`/`baseline_scale`:
+  `E_rev_norm[i] = (e_rev − baseline_median[i]) / baseline_scale[i]`. Verified on 0523:
+  `E_E_norm ≈ +21` (>0 for all neurons), `E_I_norm ≈ −4.8` (<0 for all), `v_rest_norm ≈ 0` — and note
+  the physical asymmetry the current kernel cannot represent (excitation has ~4× the driving force of
+  inhibition at rest).
+- *Integration (stability).* Use a **backward-Euler / implicit** step
+  `v ← (α·v + gE·E_E + gI·E_I + bias + slow/h) / (1 + gE + gI)`; unconditionally stable for
+  `gE,gI ≥ 0`. An explicit step `v ← α·v + gE·(E_E−v) + gI·(E_I−v)` diverges once `gE+gI > α+1` (an
+  adversarial pre-run review caught this — the fix is the implicit form). Initialize `softplus(w)`
+  small (`W₀=−4`, `softplus≈0.018`); keep the surrogate sigmoid and grad clipping. If optimization
+  still destabilizes, **warm-start** `w` from the matched-baseline `.pt` (`softplus⁻¹(|W_baseline|)`).
+- *Readout.* `effective_W = (+1 E / −1 I oracle sign)·softplus(w)`, so `|W| = softplus(w)` and
+  detection/sign stay directly comparable; sign is trivially 1.0 under oracle routing.
+- *Evaluation (paired, variance-aware).* Stage 1: P3-oracle **and** a matched current-based baseline
+  at the **same `--seed`**; save per-run diagnostics under run-tagged filenames. Success = I-only AUC
+  clearly above the 0.68 ± 0.05 band (≳ 0.74) with E-only ≥ ~0.95, overall ≥ ~0.91 (an E-collapse is a
+  bug, not a tradeoff). Stage 2 (only if promising): 2 more paired seeds, report mean ± spread. If
+  Stage 1 lands in-band or breaks, stop and report.
+- *Surrogate null caveat.* The surrogate-FDR estimators build current-based null models (conductance
+  not passed), so the binary threshold is calibrated against a current-based null; the P3 comparison
+  is on the **threshold-free** I-only AUC/AP, which is unaffected.
+
+**Status (P3 oracle prototype).** *(filled on completion with Stage-1 — and Stage-2 if reached —
+paired I-only AUC vs the matched baseline 0.6823 and the ~0.05 band, plus the verdict.)*
+
+**γ-sweep note.** The P2 `--voltage-hyperpol-gamma {0.25,0.5,1.0}` sweep is **deferred to a P3
+follow-up on the conductance model** (does hyperpol-weighting help once the form is right?), not a
+pre-P3 detour — P2 already showed γ=2 is a destructive null on the current-based kernel.
+
 ---
 
 ### P5 — Short-term-depression-aware inference synapse (depressing sessions)
@@ -406,6 +438,13 @@ coverage rises toward excitatory without bloating K.
 - Report guardrail metrics every time: inhibitory-restricted detection AUC and recall (the target),
   overall AUC (≥ 0.916 voltage-augmented), sign recovery (≥ 0.70), and FP composition
   (shared-parent / within-cluster / reverse-of-true enrichment from the existing FP diagnostic).
+- **Measurement noise (I-only AUC ≈ 0.05 run-to-run):** on `20260523_084407` the I-only detection
+  AUC varies ~0.05 between otherwise-identical fits (P0 export 0.6337 vs P2 matched baseline 0.6823 —
+  training-RNG / minibatch-shuffle variance, not a real change). Therefore evaluate any I-affecting
+  change with **paired seeds against a matched baseline** (same `--seed`, one variable changed), and
+  treat single-run I-only deltas below ~0.05 as **inconclusive**. A promising Stage-1 delta must be
+  confirmed across ≥2 more paired seeds (mean ± spread) before it counts. Use `--seed` for
+  reproducibility; the current-based matched baseline is the reference, not the P0 export.
 
 ---
 
@@ -484,3 +523,36 @@ voltage data is absent on this machine** (gitignored; only the connectivity expo
 P2 ablations require training on the recordings. Plan edits (P0/P1a Status, P0b, P5, run order)
 applied. Pending a decision on data provenance / session choice for the actual runs. See
 `EXPERIMENT_LOG.md` 2026-06-30 P2 entry.
+
+*(Update 2026-07-01: user restored the 0523 data; both P2 ablations ran. γ=2 and oracle
+l1-inh=0 both fail to lift I-only separation vs a matched baseline → committed to P3. See the
+2026-07-01 P2 log entries and the P2 Status line.)*
+
+### Prompt 3 — P3 conductance-based inference synapse (oracle-type prototype)
+
+> The scientific bet: does matching the generative conductance form recover inhibitory magnitude the
+> current-based kernel loses? Version-controlled copy of the issued prompt below.
+
+```
+Task: Phase P3 from 03_inhibition_improvement_plan.md — conductance-based inference synapse, oracle-type prototype, on non-depressing 20260523_084407. This is the scientific bet: does matching the generative synaptic form recover inhibitory magnitude that the current-based kernel loses?
+On branch feature/inhibition-detection. Context: P2 ruled out the loss-weighting suspect (entries 2026-07-01); neither hyperpol-weighted voltage (γ=2) nor oracle asymmetric-L1 moved I-only separation, and γ=2's E-collapse showed E/I compete for the single-v fitting budget under the current-based kernel. Remaining hypothesis (§1): the current-based form I_syn = Σ w·spike + bias cannot represent voltage-gated IPSPs, biasing recovered inhibitory magnitude small (I-only AUC 0.6823 vs E-only 0.9544 on the matched baseline). Simulator biophysics: e_exc=0, e_inh=−75, v_rest=−61.5, v_reset=−70, v_thresh=−50 mV (lif_simulation/models.py). Measurement note: I-only AUC run-to-run variance is ~0.05, so evaluate with paired seeds — a single-run delta below ~0.05 is inconclusive. Keep canonical numbers exact (0.883 / 0.916 / 0.70 / 0.48 / 461 / 366 E / 95 I / 2,780); the 0523 matched-baseline reference is I-only 0.6823, E-only 0.9544, overall 0.9085, sign 0.9687.
+Implement --conductance-synapse (default off = current behavior) in lif_inference/voltage_augmented_learned_lif_connectivity.py (the per-neuron forward I_syn, build_parser, connectivity readout). When on:
+  I_syn = gE·(E_E_norm − v) + gI·(E_I_norm − v) + bias, with gE = Σ_{presyn E} softplus(w_k)·(delay-weighted spike_k) and gI = Σ_{presyn I} softplus(w_k)·(delay-weighted spike_k) — both nonnegative.
+  Routing by ORACLE presynaptic type (sign of each presynaptic neuron's outgoing nonzero true_weights), passed in and labeled oracle in the run tag and log.
+  Reversal potentials in the normalized voltage frame: read e_exc, e_inh from the neuron model (don't hardcode; report the values used), and map per postsynaptic neuron i through the saved normalization: E_rev_norm[i] = (e_rev − baseline_median[i]) / baseline_scale[i]. Verify signs (E_E_norm > 0, E_I_norm < 0, v_rest maps near 0).
+  Connectivity readout: signed effective weight = +softplus(w_k) for E presyn, −softplus(w_k) for I presyn, so |W| = softplus(w_k).
+Numerical conditioning: initialize softplus(w_k) small; keep the surrogate-gradient sigmoid spike unchanged; add gradient clipping and, if needed, clamp v; log per-epoch conn_AUC trajectory (monotonic decline = numerical/optimization problem, fix before reporting; optionally warm-start from the matched-baseline .pt). Smoke-test on CPU first.
+Config: match the P2 matched-baseline exactly, changing only the synaptic form.
+Evaluation — staged, paired, variance-aware: Stage 1 (1 seed) P3-oracle AND a matched current-based baseline (same seed), re-run inhibition_diagnostics.py saving run-tagged CSVs; success = I-only AUC ≳ 0.74 with E-only ≥ ~0.95, overall ≥ ~0.91, sign ≥ ~0.97. If in-band or broken, stop and report. Stage 2 (only if promising): 2 more paired seeds, mean ± spread.
+Log + plan: EXPERIMENT_LOG entry per run; add the §3 measurement-noise rule; refine P3 with the reversal mapping / warm-start / paired-seed protocol; add a P3 Status line; note the γ-sweep is deferred to a P3 follow-up. Append this prompt under "Prompt 3" in Appendix A. Commit + push.
+```
+
+**Result (2026-07-01).** `--conductance-synapse` + `--seed` implemented in
+`lif_inference/voltage_augmented_learned_lif_connectivity.py` (forward I_syn, effective_W readout,
+build_parser, run-pipeline reversal mapping + oracle routing, loader baseline-stat surfacing, saved
+provenance), default off = byte-identical current path (smoke-confirmed). Reversal signs verified
+(E_E_norm≈+21>0, E_I_norm≈−4.8<0, v_rest_norm≈0). An adversarial pre-run review caught an
+explicit-Euler divergence (gain <−1 when gE+gI>α+1); fixed with an unconditionally-stable
+backward-Euler update (probe: v bounded within the reversal band at softplus(w)≈2). Stage-1 paired
+runs (baseline & P3, seed 1) — *(numbers + verdict filled in the P3 Status line and the 2026-07-01 P3
+log entries on completion.)*

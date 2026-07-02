@@ -332,6 +332,8 @@ def load_all_recordings_with_voltage(session_dir, dt=1.0,
     total_duration = 0.0
     recording_summaries = []
     burst_onset_bins = []
+    baseline_medians_list = []
+    baseline_scales_list = []
 
     # Clean each recording independently before concatenation so masks and normalization stay recording-local.
     for rec_file in rec_files:
@@ -369,6 +371,11 @@ def load_all_recordings_with_voltage(session_dir, dt=1.0,
             mask_post_ms=mask_post_ms,
             peak_threshold_mv=peak_threshold_mv,
         )
+        # Capture per-neuron normalization stats (physical mV) before downsampling;
+        # these are per-recording scalars, independent of the voltage sample rate.
+        baseline_medians_list.append(np.asarray(processed['baseline_medians'], dtype=np.float32))
+        baseline_scales_list.append(np.asarray(processed['baseline_scales'], dtype=np.float32))
+
         processed = downsample_processed_voltage(processed, voltage_dt_factor)
 
         spike_matrices.append(spike_matrix)
@@ -401,6 +408,11 @@ def load_all_recordings_with_voltage(session_dir, dt=1.0,
         'neuron_positions': net_data['neuron_positions'],
         'n_neurons': len(net_data['neuron_positions']),
         'recording_summaries': recording_summaries,
+        # Per-neuron normalization baseline/scale (mean across recordings), used to map
+        # physical reversal potentials into the normalized voltage frame for the P3
+        # conductance synapse: E_rev_norm[i] = (e_rev - baseline_median[i]) / baseline_scale[i].
+        'baseline_medians': np.mean(np.stack(baseline_medians_list, axis=0), axis=0),
+        'baseline_scales': np.mean(np.stack(baseline_scales_list, axis=0), axis=0),
     }
 
 
@@ -627,7 +639,9 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
     """
 
     def __init__(self, n_neurons, K, max_delay=5, threshold_mode='adaptive',
-                 slow_state_mode='none', dale=False, neighbor_indices=None):
+                 slow_state_mode='none', dale=False, neighbor_indices=None,
+                 conductance_synapse=False, presyn_type_signs=None,
+                 e_exc_norm=None, e_inh_norm=None):
         """Initialize the voltage-augmented learned-LIF model parameters.
 
         Args:
@@ -655,8 +669,42 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
                 "use 'none', 'adaptation', 'h', or 'adaptation_h'"
             )
 
-        self.W = nn.Parameter(torch.zeros(n_neurons, K))
+        # P3 conductance-based synapse (oracle-type-routed). Off by default; when on,
+        # I_syn = gE*(E_E_norm - v) + gI*(E_I_norm - v) + bias with gE/gI nonnegative
+        # softplus-weighted spike sums routed by ORACLE presynaptic type. |W| = softplus(W).
+        self.conductance_synapse = bool(conductance_synapse)
+        if self.conductance_synapse:
+            # Small initial magnitudes: softplus(-4) ~= 0.018, so conductances start weak
+            # and the driving-force feedback (E_rev - v) keeps early dynamics stable
+            # (avoids the monotonic-decline failure seen with moderate init).
+            self.W = nn.Parameter(torch.full((n_neurons, K), -4.0))
+        else:
+            self.W = nn.Parameter(torch.zeros(n_neurons, K))
         self.dale = bool(dale)
+        if self.conductance_synapse:
+            if presyn_type_signs is None or e_exc_norm is None or e_inh_norm is None:
+                raise ValueError(
+                    'conductance_synapse=True requires presyn_type_signs [n,K] (+1 E / -1 I / 0 untyped) '
+                    'and per-neuron e_exc_norm / e_inh_norm reversal potentials.'
+                )
+            if self.dale:
+                raise ValueError('conductance_synapse and dale are mutually exclusive parameterizations.')
+            self.register_buffer(
+                'presyn_type_sign_buffer',
+                torch.as_tensor(np.asarray(presyn_type_signs, dtype=np.float32)),
+            )
+            self.register_buffer(
+                'e_exc_norm_buffer',
+                torch.as_tensor(np.asarray(e_exc_norm, dtype=np.float32)).reshape(n_neurons),
+            )
+            self.register_buffer(
+                'e_inh_norm_buffer',
+                torch.as_tensor(np.asarray(e_inh_norm, dtype=np.float32)).reshape(n_neurons),
+            )
+        else:
+            self.presyn_type_sign_buffer = None
+            self.e_exc_norm_buffer = None
+            self.e_inh_norm_buffer = None
         if self.dale:
             if neighbor_indices is None:
                 raise ValueError(
@@ -848,7 +896,23 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
                 shifted = F.pad(pre_spikes[:, :, :-d], (d, 0))
             delayed_inputs += shifted * delay_weights[:, :, d].unsqueeze(-1)
 
-        I_syn = (w.unsqueeze(-1) * delayed_inputs).sum(dim=1) + bias.unsqueeze(-1)
+        if self.conductance_synapse:
+            # Split nonnegative conductance magnitudes by ORACLE presynaptic type and
+            # accumulate excitatory / inhibitory conductance time-series [B, T]. The
+            # driving-force term (E_rev - v) is applied per timestep below since it
+            # depends on the instantaneous voltage.
+            g_mag = w.abs()                                        # softplus(W) >= 0, [B, K]
+            sign = self.presyn_type_sign_buffer[neuron_ids]       # +1 E / -1 I / 0 untyped
+            e_mask = (sign > 0).to(w.dtype)
+            i_mask = (sign < 0).to(w.dtype)
+            gE = ((g_mag * e_mask).unsqueeze(-1) * delayed_inputs).sum(dim=1)   # [B, T] >= 0
+            gI = ((g_mag * i_mask).unsqueeze(-1) * delayed_inputs).sum(dim=1)   # [B, T] >= 0
+            E_E_norm = self.e_exc_norm_buffer[neuron_ids]         # [B]
+            E_I_norm = self.e_inh_norm_buffer[neuron_ids]         # [B]
+            I_syn = None
+        else:
+            gE = gI = E_E_norm = E_I_norm = None
+            I_syn = (w.unsqueeze(-1) * delayed_inputs).sum(dim=1) + bias.unsqueeze(-1)
 
         alpha = self.alpha
         beta = self.beta
@@ -877,7 +941,12 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
 
         for chunk_start in range(0, T, tbptt_len):
             chunk_end = min(chunk_start + tbptt_len, T)
-            I_chunk = I_syn[:, chunk_start:chunk_end]
+            if self.conductance_synapse:
+                gE_chunk = gE[:, chunk_start:chunk_end]
+                gI_chunk = gI[:, chunk_start:chunk_end]
+                I_chunk = None
+            else:
+                I_chunk = I_syn[:, chunk_start:chunk_end]
             chunk_len = chunk_end - chunk_start
 
             v = v.detach()
@@ -888,12 +957,30 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
             v_chunk = torch.zeros(B, chunk_len, device=device)
 
             for t in range(chunk_len):
-                intrinsic_current = I_chunk[:, t]
-                if self.uses_slow_adaptation:
-                    intrinsic_current = intrinsic_current - slow_adapt
-                if self.uses_h_current:
-                    intrinsic_current = intrinsic_current + h_current_gain * h_state
-                v = alpha * v + intrinsic_current
+                if self.conductance_synapse:
+                    # Conductance drive with voltage-dependent driving force, integrated
+                    # with a BACKWARD-EULER (implicit) step so the synaptic conductance is
+                    # evaluated at v_{t+1}:
+                    #   v = (alpha*v + gE*E_E + gI*E_I + bias + slow/h currents) / (1 + gE + gI)
+                    # Since gE, gI >= 0 the denominator >= 1, so the update is
+                    # unconditionally stable (no CFL bound) — unlike an explicit step whose
+                    # gain (alpha - gE - gI) diverges once gE+gI > alpha+1. High conductance
+                    # correctly shunts the membrane toward the conductance-weighted reversal.
+                    gE_t = gE_chunk[:, t]
+                    gI_t = gI_chunk[:, t]
+                    numerator = alpha * v + gE_t * E_E_norm + gI_t * E_I_norm + bias
+                    if self.uses_slow_adaptation:
+                        numerator = numerator - slow_adapt
+                    if self.uses_h_current:
+                        numerator = numerator + h_current_gain * h_state
+                    v = numerator / (1.0 + gE_t + gI_t)
+                else:
+                    intrinsic_current = I_chunk[:, t]
+                    if self.uses_slow_adaptation:
+                        intrinsic_current = intrinsic_current - slow_adapt
+                    if self.uses_h_current:
+                        intrinsic_current = intrinsic_current + h_current_gain * h_state
+                    v = alpha * v + intrinsic_current
                 dynamic_threshold = threshold_base + threshold_adapt
                 s = torch.sigmoid(beta * (v - dynamic_threshold))
                 sp_chunk[:, t] = s
@@ -923,7 +1010,13 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         return spike_probs, voltages, w
 
     def effective_W(self):
-        """Return candidate weights after optional Dale sign tying."""
+        """Return candidate weights after optional Dale sign tying or conductance routing."""
+        if self.conductance_synapse:
+            # Signed effective weight = (+1 E / -1 I / 0 untyped) * softplus(W), so
+            # |W| = softplus(W) (the nonnegative conductance magnitude) and the sign is
+            # the oracle presynaptic type — keeping detection/sign metrics comparable to
+            # the current-based model.
+            return self.presyn_type_sign_buffer * F.softplus(self.W)
         if not self.dale:
             return self.W
         assert self.presyn_sign_logit is not None
@@ -2056,6 +2149,8 @@ def load_single_recording_with_voltage(session_dir, recording_idx=0, dt=1.0,
         mask_post_ms=mask_post_ms,
         peak_threshold_mv=peak_threshold_mv,
     )
+    baseline_medians = np.asarray(processed['baseline_medians'], dtype=np.float32)
+    baseline_scales = np.asarray(processed['baseline_scales'], dtype=np.float32)
     processed = downsample_processed_voltage(processed, voltage_dt_factor)
 
     return {
@@ -2067,6 +2162,8 @@ def load_single_recording_with_voltage(session_dir, recording_idx=0, dt=1.0,
         'connections': net_data['connections'],
         'neuron_positions': net_data['neuron_positions'],
         'n_neurons': len(net_data['neuron_positions']),
+        'baseline_medians': baseline_medians,
+        'baseline_scales': baseline_scales,
         'n_recordings': 1,
         'total_duration': float(n_common * dt),
         'recording_summaries': [{
@@ -2088,6 +2185,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  max_delay=None, max_delay_ms=10.0, l1_lambda=0.01, pos_weight=5.0,
                  dale=False, voltage_lambda=1.0,
                  voltage_hyperpol_gamma=0.0, l1_inhibitory_scale=1.0,
+                 conductance_synapse=False, seed=None,
                  subsample_T=None, device=None,
                  output_tag=None, pre_context=50, post_context=10,
                  warmup=100, neg_ratio=1.0, neg_min_distance=100,
@@ -2178,6 +2276,16 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     """
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if seed is not None:
+        # Make the main training run reproducible (DataLoader shuffle uses the global
+        # torch RNG; model init is otherwise deterministic). Enables paired-seed A/B
+        # comparisons where only the synaptic form differs. Default None keeps prior
+        # (unseeded) behavior. The surrogate estimators keep their own surrogate_seed.
+        import random as _random
+        _random.seed(int(seed))
+        np.random.seed(int(seed))
+        torch.manual_seed(int(seed))
+        print(f'Deterministic seed: {int(seed)} (paired-run reproducibility)')
     training_mode = str(training_mode).strip().lower()
     if training_mode not in {'event_window', 'continuous_state'}:
         raise ValueError(
@@ -2211,6 +2319,9 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     if l1_inhibitory_scale is not None and float(l1_inhibitory_scale) != 1.0:
         print(f'P2 l1-inhibitory-scale={l1_inhibitory_scale} on ORACLE-inhibitory candidates '
               f'(presynaptic type from sign of outgoing true_weights; oracle diagnostic)')
+    if conductance_synapse:
+        print('P3 conductance-synapse=ON: I_syn = gE*(E_E_norm-v) + gI*(E_I_norm-v) + bias, '
+              'gE/gI routed by ORACLE presynaptic type (oracle prototype)')
     print(f'Window: warmup={warmup}, pre={pre_context}, post={post_context} ({warmup + pre_context + post_context} bins)')
     print(f'Training mode: {training_mode}, continuous_chunk_len={continuous_chunk_len}')
     print(f'Voltage cleaning: mask_pre={mask_pre_ms}ms, mask_post={mask_post_ms}ms, peak<{peak_threshold_mv}mV')
@@ -2247,6 +2358,8 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     n_neurons = data['n_neurons']
     connections = data['connections']
     positions = data['neuron_positions']
+    baseline_medians = data.get('baseline_medians')
+    baseline_scales = data.get('baseline_scales')
     saved_burst_onset_bins = np.asarray(
         data.get('burst_onset_bins', np.array([], dtype=np.int32)),
         dtype=np.int32,
@@ -2390,6 +2503,60 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         print(f'  Train chunks: {train_chunks} x all-neuron batches')
         print(f'  Val chunks:   {val_chunks} x all-neuron batches')
 
+    # --- P3 conductance-based synapse setup (oracle-type-routed). Builds the
+    # per-candidate ORACLE type signs and maps the physical reversal potentials into
+    # the per-neuron normalized voltage frame. Off by default (empty kwargs). ---
+    conductance_synapse = bool(conductance_synapse)
+    conductance_kwargs = {}
+    conductance_e_exc = float('nan')
+    conductance_e_inh = float('nan')
+    if conductance_synapse:
+        col_sum = true_weights.sum(axis=0)
+        has_outgoing = (true_weights != 0).any(axis=0)
+        presyn_sign_by_neuron = np.zeros(n_neurons, dtype=np.float32)
+        presyn_sign_by_neuron[has_outgoing & (col_sum > 0.0)] = 1.0
+        presyn_sign_by_neuron[has_outgoing & (col_sum < 0.0)] = -1.0
+        presyn_type_signs = np.zeros((n_neurons, K_actual), dtype=np.float32)
+        for j in range(n_neurons):
+            pre_ids = np.asarray(neighbor_indices[j], dtype=np.int64).ravel()[:K_actual]
+            presyn_type_signs[j, :len(pre_ids)] = presyn_sign_by_neuron[pre_ids]
+
+        from lif_simulation.models import LIFNeuron
+        _proto = LIFNeuron(neuron_id=0)
+        e_exc_phys, e_inh_phys, v_rest_phys = float(_proto.e_exc), float(_proto.e_inh), float(_proto.v_rest)
+        conductance_e_exc, conductance_e_inh = e_exc_phys, e_inh_phys
+        if baseline_medians is None or baseline_scales is None:
+            raise ValueError(
+                'conductance_synapse requires per-neuron baseline_medians/baseline_scales '
+                'from the voltage loader (normalization stats for the reversal mapping).'
+            )
+        bm = np.asarray(baseline_medians, dtype=np.float64)
+        bs = np.asarray(baseline_scales, dtype=np.float64)
+        bs_safe = np.where(np.abs(bs) < 1e-6, 1.0, bs)
+        e_exc_norm = ((e_exc_phys - bm) / bs_safe).astype(np.float32)
+        e_inh_norm = ((e_inh_phys - bm) / bs_safe).astype(np.float32)
+        v_rest_norm = ((v_rest_phys - bm) / bs_safe).astype(np.float32)
+
+        n_E = int((presyn_sign_by_neuron > 0).sum()); n_I = int((presyn_sign_by_neuron < 0).sum())
+        n_bad_E = int((e_exc_norm <= 0).sum()); n_bad_I = int((e_inh_norm >= 0).sum())
+        print(f'  P3 CONDUCTANCE SYNAPSE ON (ORACLE type routing): {n_E} E / {n_I} I presynaptic neurons typed; '
+              f'{int((presyn_type_signs > 0).sum())} E-candidate + {int((presyn_type_signs < 0).sum())} I-candidate '
+              f'slots (of {n_neurons * K_actual}).')
+        print(f'  Reversals from LIFNeuron: e_exc={e_exc_phys:g} mV, e_inh={e_inh_phys:g} mV, v_rest={v_rest_phys:g} mV.')
+        print(f'  Normalized frame (mean over neurons): E_E_norm={e_exc_norm.mean():+.3f} '
+              f'[{e_exc_norm.min():+.3f},{e_exc_norm.max():+.3f}], E_I_norm={e_inh_norm.mean():+.3f} '
+              f'[{e_inh_norm.min():+.3f},{e_inh_norm.max():+.3f}], v_rest_norm={v_rest_norm.mean():+.3f} '
+              f'(|mean|={np.abs(v_rest_norm).mean():.3f}).')
+        print(f'  Sign check: E_E_norm>0 for {n_neurons - n_bad_E}/{n_neurons}, E_I_norm<0 for '
+              f'{n_neurons - n_bad_I}/{n_neurons}, v_rest_norm~0 (target). '
+              f'{"OK" if (n_bad_E == 0 and n_bad_I == 0) else f"WARN {n_bad_E} E / {n_bad_I} I sign violations (degenerate/silent neurons)"}.')
+        conductance_kwargs = dict(
+            conductance_synapse=True,
+            presyn_type_signs=presyn_type_signs,
+            e_exc_norm=e_exc_norm,
+            e_inh_norm=e_inh_norm,
+        )
+
     model = VoltageAugmentedPerNeuronLIF(
         n_neurons=n_neurons,
         K=K_actual,
@@ -2398,6 +2565,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         slow_state_mode=slow_state_mode,
         dale=dale,
         neighbor_indices=neighbor_indices,
+        **conductance_kwargs,
     ).to(device)
     # --- P2 loss-reshaping config attached to the model (read by the epoch
     # runners via getattr; surrogate/baseline models never see these). Both
@@ -2730,6 +2898,11 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         l1_inhibitory_scale=np.array(float(l1_inhibitory_scale)),
         l1_inhibitory_type_source=('oracle_true_weights'
                                    if l1_inhibitory_scale != 1.0 else 'none'),
+        conductance_synapse=np.array(bool(model.conductance_synapse)),
+        conductance_type_source=('oracle_true_weights' if model.conductance_synapse else 'none'),
+        conductance_e_exc=np.array(float(conductance_e_exc)),
+        conductance_e_inh=np.array(float(conductance_e_inh)),
+        seed=np.array(-1 if seed is None else int(seed)),
         per_neuron_ids=per_neuron_ids,
         per_neuron_thresholds=per_neuron_thresholds,
         per_neuron_selected_edges=per_neuron_selected_edges,
@@ -2806,6 +2979,16 @@ def build_parser():
                              'presynaptic neuron is inhibitory (ORACLE type from sign of outgoing '
                              'true_weights), 1.0 otherwise. Use 0.0 to remove L1 pressure on '
                              'inhibitory candidates. Default 1.0 reproduces uniform L1. Oracle diagnostic.')
+    parser.add_argument('--conductance-synapse', action='store_true',
+                        help='P3 (default off). Replace the current-based kernel I_syn=Sum w*spike+bias '
+                             'with a conductance drive I_syn = gE*(E_E_norm-v) + gI*(E_I_norm-v) + bias, '
+                             'where gE/gI are nonnegative softplus-weighted spike sums routed by ORACLE '
+                             'presynaptic type (sign of outgoing true_weights). Reversal potentials read '
+                             'from the neuron model and mapped into the per-neuron normalized voltage '
+                             'frame. |W|=softplus(w); sign=oracle type. Oracle prototype for the §1 form test.')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Optional deterministic seed (torch/numpy/random) for reproducible, '
+                             'paired A/B runs. Default None keeps prior unseeded behavior.')
     parser.add_argument('--dt', type=float, default=None,
                         help='Optional spike/voltage bin width override in ms. Defaults to the session metadata value.')
     parser.add_argument('--recording', type=int, default=0)
@@ -2904,6 +3087,8 @@ def main(argv=None):
         voltage_lambda=args.voltage_lambda,
         voltage_hyperpol_gamma=args.voltage_hyperpol_gamma,
         l1_inhibitory_scale=args.l1_inhibitory_scale,
+        conductance_synapse=args.conductance_synapse,
+        seed=args.seed,
         val_fraction=args.val_fraction, output_tag=args.output_tag,
         subsample_T=args.subsample, device=args.device,
         pre_context=args.pre_context, post_context=args.post_context,
