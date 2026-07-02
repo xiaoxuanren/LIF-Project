@@ -335,8 +335,19 @@ prevents a repeat of the Dale confound (where a mechanically-correct change stil
   not passed), so the binary threshold is calibrated against a current-based null; the P3 comparison
   is on the **threshold-free** I-only AUC/AP, which is unaffected.
 
-**Status (P3 oracle prototype).** *(filled on completion with Stage-1 — and Stage-2 if reached —
-paired I-only AUC vs the matched baseline 0.6823 and the ~0.05 band, plus the verdict.)*
+**Status (P3 oracle prototype — Stage 1, 2026-07-02, paired seed 1: INCONCLUSIVE, degenerate regime).**
+Paired same-seed comparison — overall AUC 0.9036 → **0.6659**, E-only 0.9484 → **0.6879** (E-collapse),
+I-only 0.6783 → 0.6400 (within the ~0.05 band), I-only AP 0.2279 → 0.0534, but **weight_corr rose
+0.7845 → 0.9574** (true-edge magnitudes recovered *better*). During training the membrane leak
+**alpha collapsed 0.87 → 0.002**, driving `v` to an instantaneous conductance-weighted reversal
+average (no temporal integration) — a **parameterization pathology**, so this does **not** cleanly
+test §1 and is not a negative result. The failure is *specificity* (non-edges inflated), not
+magnitude. Guardrails fail (overall ≪ 0.91, E-only ≪ 0.95; sign trivially 1.0 under oracle). Stage 1
+does not clear; Stage 2 not warranted. **Decision pending:** re-run with the model held in the
+integrating regime (warm-start membrane+weights from the baseline `.pt` and/or constrain alpha,
+and/or stronger L1) before any §1 verdict. Two prior mis-starts fixed first (explicit-Euler
+divergence → backward-Euler; W=−4 gradient starvation → W=0). See `EXPERIMENT_LOG.md` 2026-07-02 P3
+entry.
 
 **γ-sweep note.** The P2 `--voltage-hyperpol-gamma {0.25,0.5,1.0}` sweep is **deferred to a P3
 follow-up on the conductance model** (does hyperpol-weighting help once the form is right?), not a
