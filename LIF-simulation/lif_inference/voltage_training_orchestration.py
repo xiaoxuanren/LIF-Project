@@ -82,7 +82,7 @@ def train_voltage_model_with_early_stopping(
                 elapsed_seconds=elapsed,
             )
         elif log_fn is not None and (((epoch + 1) % log_interval == 0) or epoch == 0):
-            alpha = torch.sigmoid(model.alpha_logit).item()
+            alpha = float(model.alpha.detach())  # true leak (frozen value when --freeze-alpha)
             thresh_inc = model.threshold_increment.mean().item()
             thresh_decay = model.threshold_decay.item()
             log_fn(

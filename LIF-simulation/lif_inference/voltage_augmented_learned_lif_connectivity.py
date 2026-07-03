@@ -641,7 +641,8 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
     def __init__(self, n_neurons, K, max_delay=5, threshold_mode='adaptive',
                  slow_state_mode='none', dale=False, neighbor_indices=None,
                  conductance_synapse=False, presyn_type_signs=None,
-                 e_exc_norm=None, e_inh_norm=None):
+                 e_exc_norm=None, e_inh_norm=None,
+                 freeze_alpha=False, frozen_alpha=None):
         """Initialize the voltage-augmented learned-LIF model parameters.
 
         Args:
@@ -729,6 +730,18 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
         self.bias = nn.Parameter(torch.zeros(n_neurons))
 
         self.alpha_logit = nn.Parameter(torch.tensor(3.0))
+        # P3b: optionally freeze the membrane leak at its physical value exp(-dt/tau_m)
+        # (oracle-on-tau_m diagnostic) to close the degenerate alpha->0 basin. When set,
+        # alpha_logit is made non-trainable and the alpha property returns the frozen
+        # constant; the (1+gE+gI) conductance shunt stays emergent.
+        self.freeze_alpha = bool(freeze_alpha)
+        if self.freeze_alpha:
+            if frozen_alpha is None:
+                raise ValueError('freeze_alpha=True requires frozen_alpha=exp(-dt/tau_m).')
+            self.register_buffer('frozen_alpha', torch.tensor(float(frozen_alpha)))
+            self.alpha_logit.requires_grad_(False)
+        else:
+            self.frozen_alpha = None
         if self.threshold_mode == 'adaptive':
             self.threshold_base = nn.Parameter(torch.ones(n_neurons))
             self.threshold_increment_raw = nn.Parameter(torch.full((n_neurons,), -2.0))
@@ -778,8 +791,11 @@ class VoltageAugmentedPerNeuronLIF(nn.Module):
             None.
 
         Returns:
-            The shared membrane leak factor derived from ``alpha_logit``.
+            The shared membrane leak factor derived from ``alpha_logit``, or the
+            frozen physical value ``exp(-dt/tau_m)`` when ``freeze_alpha`` is set.
         """
+        if getattr(self, 'freeze_alpha', False):
+            return self.frozen_alpha
         return torch.sigmoid(self.alpha_logit)
 
     @property
@@ -2187,7 +2203,7 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
                  max_delay=None, max_delay_ms=10.0, l1_lambda=0.01, pos_weight=5.0,
                  dale=False, voltage_lambda=1.0,
                  voltage_hyperpol_gamma=0.0, l1_inhibitory_scale=1.0,
-                 conductance_synapse=False, seed=None,
+                 conductance_synapse=False, seed=None, freeze_alpha=False,
                  subsample_T=None, device=None,
                  output_tag=None, pre_context=50, post_context=10,
                  warmup=100, neg_ratio=1.0, neg_min_distance=100,
@@ -2324,6 +2340,9 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
     if conductance_synapse:
         print('P3 conductance-synapse=ON: I_syn = gE*(E_E_norm-v) + gI*(E_I_norm-v) + bias, '
               'gE/gI routed by ORACLE presynaptic type (oracle prototype)')
+    if freeze_alpha:
+        print('P3b freeze-alpha=ON: membrane leak frozen at physical exp(-dt/tau_m) '
+              '(oracle-on-tau_m; closes the degenerate alpha->0 basin)')
     print(f'Window: warmup={warmup}, pre={pre_context}, post={post_context} ({warmup + pre_context + post_context} bins)')
     print(f'Training mode: {training_mode}, continuous_chunk_len={continuous_chunk_len}')
     print(f'Voltage cleaning: mask_pre={mask_pre_ms}ms, mask_post={mask_post_ms}ms, peak<{peak_threshold_mv}mV')
@@ -2558,6 +2577,21 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
             e_exc_norm=e_exc_norm,
             e_inh_norm=e_inh_norm,
         )
+
+    # --- P3b frozen membrane leak (oracle-on-tau_m diagnostic). alpha fixed at the
+    # physical rest leak exp(-dt/tau_m); tau_m read from the simulator neuron model,
+    # dt from the resolved training config. Closes the degenerate alpha->0 basin. ---
+    freeze_alpha = bool(freeze_alpha)
+    frozen_alpha_value = float('nan')
+    frozen_tau_m = float('nan')
+    if freeze_alpha:
+        from lif_simulation.models import LIFNeuron
+        frozen_tau_m = float(LIFNeuron(neuron_id=0).tau_m)  # excitatory membrane tau (ms)
+        frozen_alpha_value = float(np.exp(-float(dt) / frozen_tau_m))
+        conductance_kwargs['freeze_alpha'] = True
+        conductance_kwargs['frozen_alpha'] = frozen_alpha_value
+        print(f'  P3b FREEZE-ALPHA ON (oracle-on-tau_m): tau_m={frozen_tau_m:g} ms (LIFNeuron), '
+              f'dt={float(dt):g} ms -> alpha=exp(-dt/tau_m)={frozen_alpha_value:.5f} (held fixed, non-trainable).')
 
     model = VoltageAugmentedPerNeuronLIF(
         n_neurons=n_neurons,
@@ -2904,6 +2938,9 @@ def run_pipeline(session_dir, K=50, recording_idx=0, n_epochs=40, lr=1e-3,
         conductance_type_source=('oracle_true_weights' if model.conductance_synapse else 'none'),
         conductance_e_exc=np.array(float(conductance_e_exc)),
         conductance_e_inh=np.array(float(conductance_e_inh)),
+        freeze_alpha=np.array(bool(freeze_alpha)),
+        frozen_alpha=np.array(float(frozen_alpha_value)),
+        frozen_tau_m=np.array(float(frozen_tau_m)),
         seed=np.array(-1 if seed is None else int(seed)),
         per_neuron_ids=per_neuron_ids,
         per_neuron_thresholds=per_neuron_thresholds,
@@ -2991,6 +3028,11 @@ def build_parser():
     parser.add_argument('--seed', type=int, default=None,
                         help='Optional deterministic seed (torch/numpy/random) for reproducible, '
                              'paired A/B runs. Default None keeps prior unseeded behavior.')
+    parser.add_argument('--freeze-alpha', action='store_true',
+                        help='P3b (default off). Freeze the membrane leak alpha at the physical rest '
+                             'value exp(-dt/tau_m) (tau_m from the neuron model, dt from config) and make '
+                             'it non-trainable, closing the degenerate alpha->0 basin seen in P3 Stage-1. '
+                             'Oracle-on-tau_m diagnostic; the (1+gE+gI) conductance shunt stays emergent.')
     parser.add_argument('--dt', type=float, default=None,
                         help='Optional spike/voltage bin width override in ms. Defaults to the session metadata value.')
     parser.add_argument('--recording', type=int, default=0)
@@ -3091,6 +3133,7 @@ def main(argv=None):
         l1_inhibitory_scale=args.l1_inhibitory_scale,
         conductance_synapse=args.conductance_synapse,
         seed=args.seed,
+        freeze_alpha=args.freeze_alpha,
         val_fraction=args.val_fraction, output_tag=args.output_tag,
         subsample_T=args.subsample, device=args.device,
         pre_context=args.pre_context, post_context=args.post_context,

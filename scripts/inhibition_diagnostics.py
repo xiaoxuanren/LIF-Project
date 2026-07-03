@@ -138,11 +138,27 @@ def build_candidates(C, Wtrue, NB, pretype):
     posts = np.asarray(posts, dtype=int)
     pres = np.asarray(pres, dtype=int)
     score = np.abs(C[posts, pres])
-    is_true = np.abs(Wtrue[posts, pres]) > 0
+    true_mag = np.abs(Wtrue[posts, pres])          # |true weight| per candidate
+    is_true = true_mag > 0
     pre_is_E = pretype[pres] == 1
     pre_is_I = pretype[pres] == -1
-    return dict(post=posts, pre=pres, score=score, is_true=is_true,
+    return dict(post=posts, pre=pres, score=score, true_mag=true_mag, is_true=is_true,
                 pre_is_E=pre_is_E, pre_is_I=pre_is_I)
+
+
+def magnitude_corr(recovered_abs, true_abs):
+    """Within-type Pearson correlation of recovered |W| vs true |W| over true edges.
+
+    The honest magnitude-recovery metric under oracle sign routing: unlike a pooled
+    signed weight correlation (which is inflated because oracle routing fixes every
+    edge's sign, so the E>0 / I<0 split alone drives the pooled Pearson), this
+    correlates only magnitudes and is computed separately within each type.
+    """
+    if recovered_abs.size < 2:
+        return float("nan")
+    if np.std(recovered_abs) < 1e-12 or np.std(true_abs) < 1e-12:
+        return float("nan")
+    return float(np.corrcoef(recovered_abs, true_abs)[0, 1])
 
 
 # ----------------------------------------------------------------------------
@@ -389,6 +405,13 @@ def main():
     print(f"[P0 signal/null] I overlap={ovl_I:.4f} (AUC={sig_auc_I:.4f})  "
           f"E overlap={ovl_E:.4f} (AUC={sig_auc_E:.4f})")
 
+    # ---- within-type magnitude recovery (honest under oracle sign routing) ----
+    tm = cand["true_mag"]
+    magcorr_E = magnitude_corr(cand["score"][Em & cand["is_true"]], tm[Em & cand["is_true"]])
+    magcorr_I = magnitude_corr(cand["score"][Im & cand["is_true"]], tm[Im & cand["is_true"]])
+    print(f"[P0 magnitude]  within-type |W| Pearson: E={magcorr_E:.4f}  I={magcorr_I:.4f} "
+          f"(over true edges; NOT the pooled signed weight_corr, which oracle routing inflates)")
+
     png_path = os.path.join(out_dir, f"inhibition_signal_vs_null_{session}.png")
     make_histogram(cand, png_path, session, sig_auc_I, ovl_I, sig_auc_E, ovl_E)
     print(f"[fig] {png_path}")
@@ -478,6 +501,9 @@ def main():
         ("I_signal_vs_null_overlap", ovl_I),
         ("E_signal_vs_null_auc", sig_auc_E),
         ("E_signal_vs_null_overlap", ovl_E),
+        # within-type magnitude recovery (honest under oracle sign routing)
+        ("magnitude_corr_E_withintype", magcorr_E),
+        ("magnitude_corr_I_withintype", magcorr_I),
         ("n_candidates_total", int(sc.size)),
         ("n_candidates_I", int(I_sc.size)),
         ("n_true_I_in_candidates", n_true_I),
