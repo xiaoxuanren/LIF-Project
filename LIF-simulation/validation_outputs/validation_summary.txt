@@ -1,0 +1,81 @@
+==============================================================================
+SPONTANEOUS-BURSTING VALIDATION
+==============================================================================
+Build seed (fixed for all runs): 7
+Config: {'num_clusters': 15, 'neurons_per_cluster_range': (12, 18), 'inhibitory_probability': 0.2, 'within_cluster_prob': 0.5, 'between_cluster_prob': 0.15, 'max_connection_distance': 8.0, 'space_size': 15, 'hub_fraction': 0.1, 'hub_between_prob': 0.4, 'hub_weight_scale': 1.5, 'hub_reciprocal_factor': 2.0, 'use_h_current': True, 'background_noise_sigma': 1.4, 'depressing': True, 'delta_q': 0.8, 'tau_q': 1500}
+Transforms: baseline mean=0.0 sd=0.0 (drivers OFF), adapt tau_scale=3.0 increment_scale=1.0, exc_weight_scale=4.0
+Burn-in dropped before scoring: 1000 ms
+
+------------------------------------------------------------------------------
+VALIDATION A - spontaneous network bursts
+------------------------------------------------------------------------------
+Built network: N=228 (189 exc / 39 inh), 1946 connections
+Realized connectivity: within=0.3702  between_base=0.000474  (between_all=0.01508)
+  hub share of inter-cluster edges = 96.9%  (708/731); overall density = 3.76%
+Running validated config for 30000 ms (noise seed=100) ...
+  mean_rate = 2.179 Hz
+  network-burst freq = 1.862 Hz (54 bursts)
+  steady-state peak AF = 0.706
+  % spikes in bursts = 56.6%
+  inter-burst per-neuron rate = 0.984 Hz
+  per-2s window rates (Hz) = [2.08, 2.38, 2.05, 2.28, 2.18, 1.94, 2.44, 2.0, 2.18, 2.32, 2.27, 1.92, 2.24, 2.21]
+  runaway flag = False
+  saved: validation_A_validated_raster.png
+
+  [A] discrete bursts (peak AF > 0.4): True (peak AF = 0.706)
+  [A] sparse non-silent inter-burst baseline (IB rate > 0): True (IB rate = 0.984 Hz)
+  [A] stable / not runaway: True
+  VALIDATION A: PASS
+
+------------------------------------------------------------------------------
+VALIDATION B - no stimulation is used
+------------------------------------------------------------------------------
+B.1 assertions on the validated run:
+     stimulation_events == []            -> True (len=0)
+     all i_baseline == 0.0               -> True (max |i_baseline| = 0.0e+00)
+     all i_ext == 0.0 (post-run)         -> True (max |i_ext| = 0.0e+00)
+     i_ext is provably 0 at ALL timesteps: with stimulation_events==[], simulate_network sets neuron.i_ext = active_stims.get(id,(0.0,0.0))[0] = 0.0 every step (active_stims never populated).
+
+B.2 noise-off control (background_noise_sigma=0.0, drivers off, no stim):
+     total spikes over 3000 ms = 0  -> SILENT
+     -> no hidden drive: with noise off and no stimulus the network cannot fire, so the bursts in A are noise-ignited, not stimulus-driven.
+     saved: validation_B_noise_off_raster.png (empty raster)
+
+B.3 seed control (identical wiring, two noise seeds):
+     seed A (noise=100) burst onsets (ms) = [10.0, 780.0, 1290.0, 1390.0, 2090.0, 2210.0, 2480.0]
+     seed B (noise=200) burst onsets (ms) = [20.0, 590.0, 1280.0, 2350.0]
+     post-burn-in onsets differ across seeds -> True (a scheduled/periodic stimulus could not do this)
+     (the t~0 startup event is identical across seeds - set by initial conditions, not noise)
+     saved: validation_B_seed_control_raster.png
+
+SPONTANEITY: CONFIRMED
+  evidence: (1) stimulation_events==[] and all i_baseline/i_ext==0; (2) noise-off copy of identical wiring is completely silent; (3) two noise seeds ignite bursts at different times.
+
+------------------------------------------------------------------------------
+VALIDATION C - adaptation is the 4-AP knob (same wiring, more excitability)
+------------------------------------------------------------------------------
+4-AP blocks K+ channels -> reduces spike-triggered K+/AHP (adaptation) -> more excitability. In this point-neuron model that maps onto LOWERING scale_adaptation_dynamics increment_scale (a K+-block proxy, not a literal I_A block).
+  increment_scale=1.0   wiring_hash_match=True  mean_rate=2.230 Hz  peak_AF=0.474  burst_freq=2.400 Hz  %in_burst=53.6
+  increment_scale=0.5   wiring_hash_match=True  mean_rate=2.575 Hz  peak_AF=0.614  burst_freq=2.200 Hz  %in_burst=43.6
+  increment_scale=0.25  wiring_hash_match=True  mean_rate=2.774 Hz  peak_AF=0.509  burst_freq=1.800 Hz  %in_burst=25.0
+  increment_scale=2.0   wiring_hash_match=True  mean_rate=1.832 Hz  peak_AF=0.654  burst_freq=1.000 Hz  %in_burst=73.9
+  saved: validation_C_adaptation_sweep_raster.png
+
+  rate shift (same wiring, lowering increment_scale = the 4-AP direction):
+     increment_scale=1.0   -> mean_rate=2.230 Hz (+0.000 Hz vs baseline)
+     increment_scale=0.5   -> mean_rate=2.575 Hz (+0.346 Hz vs baseline)
+     increment_scale=0.25  -> mean_rate=2.774 Hz (+0.544 Hz vs baseline)
+     increment_scale=2.0   -> mean_rate=1.832 Hz (opposite / more-suppressed direction)
+  monotone increase as adaptation is reduced (0.25 > 0.5 > 1.0): True
+  VALIDATION C: PASS  -- adaptation increment_scale is the 4-AP knob: same synaptic wiring, different excitability.
+
+==============================================================================
+OUTPUTS
+==============================================================================
+  table: validation_table.csv, validation_table.md
+  raster: validation_A_validated_raster.png
+  raster: validation_B_noise_off_raster.png
+  raster: validation_B_seed_control_raster.png
+  raster: validation_C_adaptation_sweep_raster.png
+
+OVERALL: A=PASS  B=CONFIRMED  C=PASS
