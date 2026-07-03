@@ -335,19 +335,29 @@ prevents a repeat of the Dale confound (where a mechanically-correct change stil
   not passed), so the binary threshold is calibrated against a current-based null; the P3 comparison
   is on the **threshold-free** I-only AUC/AP, which is unaffected.
 
-**Status (P3 oracle prototype — Stage 1, 2026-07-02, paired seed 1: INCONCLUSIVE, degenerate regime).**
-Paired same-seed comparison — overall AUC 0.9036 → **0.6659**, E-only 0.9484 → **0.6879** (E-collapse),
-I-only 0.6783 → 0.6400 (within the ~0.05 band), I-only AP 0.2279 → 0.0534, but **weight_corr rose
-0.7845 → 0.9574** (true-edge magnitudes recovered *better*). During training the membrane leak
-**alpha collapsed 0.87 → 0.002**, driving `v` to an instantaneous conductance-weighted reversal
-average (no temporal integration) — a **parameterization pathology**, so this does **not** cleanly
-test §1 and is not a negative result. The failure is *specificity* (non-edges inflated), not
-magnitude. Guardrails fail (overall ≪ 0.91, E-only ≪ 0.95; sign trivially 1.0 under oracle). Stage 1
-does not clear; Stage 2 not warranted. **Decision pending:** re-run with the model held in the
-integrating regime (warm-start membrane+weights from the baseline `.pt` and/or constrain alpha,
-and/or stronger L1) before any §1 verdict. Two prior mis-starts fixed first (explicit-Euler
-divergence → backward-Euler; W=−4 gradient starvation → W=0). See `EXPERIMENT_LOG.md` 2026-07-02 P3
-entry.
+**Status (P3 oracle prototype — NEGATIVE across Stage 1 + P3b; degeneracy deeper than the leak).**
+Paired same-seed (1), three arms — baseline (current) / P3 free-α / P3b frozen-α:
+overall AUC 0.9036 / 0.6659 / **0.3569**; E-only 0.9484 / 0.6879 / **0.3186** (E collapses, harder when
+α is frozen); I-only 0.6783 / 0.6400 / 0.6817 (**flat in every arm — no inhibitory gain**);
+within-type |W| magnitude corr E 0.684 / 0.611 / **−0.057**, I 0.100 / 0.032 / 0.028 (worse everywhere).
+- *Stage 1 (2026-07-02, learnable α):* α collapsed 0.87 → 0.002 (instantaneous conductance-average
+  regime). **Correction:** the Stage-1 pooled signed weight_corr 0.96 was an **oracle-sign artifact**
+  (oracle routing fixes every edge's sign, so the E>0/I<0 split alone inflates the pooled Pearson);
+  the honest within-type |W| magnitude corr was *worse*, not better (above). Report within-type
+  magnitude, never pooled signed weight_corr, under oracle routing.
+- *P3b (2026-07-03, `--freeze-alpha` at physical `exp(−dt/τ_m)=0.95123`):* α held fixed (verified), but
+  E collapsed *harder* and overall got *worse* (0.357 < 0.666). So the model fit connectivity *better*
+  when allowed to collapse α to the instantaneous regime than when forced to integrate — the collapse
+  was its preferred fit, not a mere pathology.
+**Verdict:** the oracle-conductance prototype does **not** beat the current form in either leak regime;
+the failure is not the membrane leak. This is **not a clean falsification of §1** — the conductance
+parameterization has its own connectivity-recovery difficulty (E-specificity collapse; driving-force
+asymmetry `E_E_norm≈+19.5` vs `E_I_norm≈−4.4`) that confounds the inhibition test. Two prior mis-starts
+were fixed first, not reported as results (explicit-Euler divergence → backward-Euler; W=−4 gradient
+starvation → W=0). **Decision pending — do not iterate this parameterization:** pivot to **P4** real
+baselines, or treat a corrected conductance decoder (normalized/per-type driving forces) as a separate
+effort, or re-examine §1 empirically (where the inhibitory information actually lives). See
+`EXPERIMENT_LOG.md` 2026-07-02 P3 and 2026-07-03 P3b entries.
 
 **γ-sweep note.** The P2 `--voltage-hyperpol-gamma {0.25,0.5,1.0}` sweep is **deferred to a P3
 follow-up on the conductance model** (does hyperpol-weighting help once the form is right?), not a
@@ -565,5 +575,30 @@ provenance), default off = byte-identical current path (smoke-confirmed). Revers
 (E_E_norm≈+21>0, E_I_norm≈−4.8<0, v_rest_norm≈0). An adversarial pre-run review caught an
 explicit-Euler divergence (gain <−1 when gE+gI>α+1); fixed with an unconditionally-stable
 backward-Euler update (probe: v bounded within the reversal band at softplus(w)≈2). Stage-1 paired
-runs (baseline & P3, seed 1) — *(numbers + verdict filled in the P3 Status line and the 2026-07-01 P3
-log entries on completion.)*
+runs (baseline & P3, seed 1): overall AUC 0.9036 → 0.6659, E-only 0.9484 → 0.6879, I-only 0.6783 →
+0.6400; learnable α collapsed 0.87 → 0.002 (degenerate instantaneous regime) — inconclusive, so P3b
+followed. See the P3 Status line and the 2026-07-01 P3 / 2026-07-03 P3b log entries.
+
+### Prompt 3b — P3b conductance synapse with frozen membrane leak
+
+> Re-test the oracle-conductance synapse with the membrane leak frozen at its physical value, to
+> close the degenerate α→0 basin from Stage-1. Version-controlled copy below.
+
+```
+Task: Phase P3b from 03_inhibition_improvement_plan.md — re-test the oracle-conductance synapse with the membrane leak frozen at its physical value, closing the degenerate alpha→0 basin from Stage-1. Paired seed 1, on 20260523_084407.
+On branch feature/inhibition-detection. Context: P3 Stage-1 (commit 36c4fe3) was inconclusive — the learnable alpha=sigmoid(alpha_logit) collapsed 0.95→0.002, making v ≈ (gE·E_E+gI·E_I+bias)/(1+gE+gI) (instantaneous conductance average, no integration), which fits Vm via aggregate conductance and destroys edge specificity (overall AUC 0.6659, E 0.6879 vs baseline 0.9484). The Stage-1 weight_corr 0.96 was an oracle-sign artifact (pooled signed Pearson; oracle routing forces correct signs) — within-type magnitude recovery was actually worse (E 0.68→0.61, I 0.09→0.03), so it is not a real signal. This phase forces integration to give the form a fair test. Keep canonical numbers exact (0.883 / 0.916 / 0.70 / 0.48 / 461 / 366 E / 95 I / 2,780). Paired baseline (seed 1, committed p3base_seed1): overall 0.9036, E 0.9484, I-only 0.6783, I-AP 0.2279. I-only run-to-run noise ≈ 0.05.
+Implement --freeze-alpha (default off): when set, make alpha_logit non-trainable and set alpha to the physical rest leak exp(−dt/τ_m), reading τ_m from the simulator neuron model and dt from the training config (report both values and the resulting alpha in the banner and saved npz). Label this an oracle-on-τ_m diagnostic. Leave the (1+gE+gI) backward-Euler denominator intact so conductance-dependent shunting stays emergent. Confirm via unit check that --freeze-alpha holds alpha fixed across training.
+Run --conductance-synapse --freeze-alpha with oracle type routing, seed 1, matched P2/P3 config (... session LIF-simulation/LIF data/20260523_084407). Tag condoracle_frozenA_seed1. Log the per-epoch conn_AUC trajectory (it should no longer decline monotonically) and the final alpha (must equal the frozen value).
+Evaluate with scripts/inhibition_diagnostics.py, saving a run-tagged CSV. Report vs baseline seed1: overall / E-only / I-only detection AUC, I-AP, and within-type magnitude correlation (E-only and I-only Pearson on |W|) — do not report pooled signed weight_corr as a magnitude metric (it's an oracle-sign artifact). Decision rule: success = E-only recovers to ~0.95 and I-only clears the 0.68 ± 0.05 band and within-type magnitude corr improves over baseline (E ≥ ~0.68, I > ~0.10). If E recovers but I stays flat → partial. If E still collapses with alpha frozen → the degeneracy is deeper than the leak; stop and report rather than iterating further.
+Log + plan. EXPERIMENT_LOG.md entry; update P3 Status (Stage-1 degenerate collapse, weight_corr-artifact correction, frozen-alpha result). Append this prompt under "Prompt 3b" in Appendix A. Commit + push. Stop after this run and report — do not proceed to more seeds or inferred-type routing without my decision.
+```
+
+**Result (2026-07-03).** `--freeze-alpha` implemented (alpha frozen at `exp(−dt/τ_m)=0.95123`, τ_m=20 ms
+from `LIFNeuron`; verified held fixed, `alpha_logit` non-trainable); diagnostics gained within-type |W|
+magnitude correlation. **Frozen-alpha did not rescue the prototype — E collapsed harder:** overall AUC
+0.3569, E-only 0.3186 (anti-correlated), I-only 0.6817 (flat); within-type magnitude E −0.057 / I 0.028.
+Worse overall than the α-collapsed Stage-1 run (0.357 < 0.666), so the collapse was the model's
+preferred fit, not a pathology. **Verdict: the oracle-conductance prototype does not beat the current
+form in either leak regime; not a clean §1 test (the conductance parameterization has its own
+recovery difficulty). Stopped per the decision rule; decision pending (P4 baselines / corrected
+conductance decoder / re-examine §1).** See the P3 Status line and the 2026-07-03 P3b log entry.

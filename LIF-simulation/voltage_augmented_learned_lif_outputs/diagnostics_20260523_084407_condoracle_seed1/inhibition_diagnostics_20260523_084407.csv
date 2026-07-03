@@ -27,6 +27,8 @@ I_signal_vs_null_auc,0.6400350908429964
 I_signal_vs_null_overlap,0.7463889074358463
 E_signal_vs_null_auc,0.6879313415211169
 E_signal_vs_null_overlap,0.6038079193421051
+magnitude_corr_E_withintype,0.6107398813001844
+magnitude_corr_I_withintype,0.031582010555104956
 n_candidates_total,46100
 n_candidates_I,10980
 n_true_I_in_candidates,408
